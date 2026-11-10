@@ -45,8 +45,9 @@ type Props struct {
 	LoadImage  func(string) (ui.ImageSource, error)
 	WrapCode   bool
 	// PlainCode omits the enhanced language/copy header. Body remains selectable.
-	PlainCode bool
-	CodeBlock func(*ui.Context, *CodeBlock)
+	PlainCode   bool
+	CodeOptions *CodeOptions
+	CodeBlock   func(*ui.Context, *CodeBlock)
 	// Code provides per-language renderers, e.g. mermaid, d2, or infographic.
 	// While a fence is open, the default code surface is retained. Finalization
 	// also releases an unclosed fence. RenderOpenCode opts into incomplete input.
@@ -91,6 +92,10 @@ func newView() *viewState {
 		}
 		if p.PlainCode {
 			b.Body(c)
+			return
+		}
+		if p.CodeOptions != nil {
+			RenderCode(c, b, *p.CodeOptions)
 			return
 		}
 		md.DefaultCodeBlock(c, b)
