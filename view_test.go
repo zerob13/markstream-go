@@ -164,3 +164,19 @@ func BenchmarkNativeSteadyFrame(b *testing.B) {
 		tt.Frame()
 	}
 }
+
+func TestStreamingFencePrefixDoesNotFlashThenRestoresAtEOF(t *testing.T) {
+	s := new(Session)
+	s.Append("```go\nvalue := 42\n")
+	tt := ui.NewTester(func(c *ui.Context) { Stream(c, s, Props{Reveal: instant}) }, 800, 400)
+	s.Append("`")
+	tt.Frame()
+	if tt.HasText("`") {
+		t.Fatal("partial closing fence flashed as code")
+	}
+	s.Finish()
+	tt.Frame()
+	if !tt.HasText("`") {
+		t.Fatal("literal incomplete fence not restored at EOF", tt.Texts())
+	}
+}

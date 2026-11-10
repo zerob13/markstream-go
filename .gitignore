@@ -2,3 +2,6 @@
 /artifacts/
 *.test
 coverage.out
+
+/tools/renderer/node_modules/
+/tools/renderer/.build/

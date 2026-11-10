@@ -3,29 +3,14 @@ package markstream
 import (
 	"net/url"
 	"strings"
-	"time"
+	"sync/atomic"
 	"unicode"
 
+	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
-	md "github.com/egoist/mygo/ui/markdown"
+	"github.com/kyokomi/emoji/v2"
 )
 
-type Theme = md.Theme
-type CodeBlock = md.CodeBlockView
-type InlineObject = md.InlineObject
-type Reveal = md.Reveal
-type RevealUnit = md.RevealUnit
-
-const (
-	ByWord      = md.ByWord
-	ByCharacter = md.ByCharacter
-	BySentence  = md.BySentence
-	ByLine      = md.ByLine
-	ByParagraph = md.ByParagraph
-	AtOnce      = md.AtOnce
-)
-
-// Variant selects typography; colors follow the window's light/dark theme.
 type Variant uint8
 
 const (
@@ -33,9 +18,36 @@ const (
 	ChatStyle
 )
 
-// Props configures a native Markdown view. Keep callbacks and Theme stable where
-// possible. Custom renderers run on the UI thread and must not block on I/O.
 type Props struct {
+	MaxLiveNodes          int
+	DisableVirtualization bool
+
+	Nodes          []*Node
+	TransformNodes func([]*Node) []*Node
+
+	NodeRenderers map[string]func(*ui.Context, *Node)
+	CustomHTML    map[string]func(*ui.Context, *Node)
+	OnTaskToggle  func(*Node, bool)
+
+	OnUpdate  func(RenderStatus)
+	OnSettled func(RenderStatus)
+	OnFinal   func(RenderStatus)
+
+	ParseRevision uint64
+
+	ImageOptions  *ImageOptions
+	DisableImages bool
+
+	Emoji             bool
+	EmojiAliases      map[string]string
+	SourceTransform   func(string) string
+	DocumentTransform func(*Document)
+	Document          *Document
+
+	Rich           *RichOptions
+	MeasurementKey string
+
+	Virtual    *VirtualState
 	Streaming  bool
 	Variant    Variant
 	Theme      *Theme
@@ -63,91 +75,296 @@ type Props struct {
 }
 
 type viewState struct {
-	props       Props
-	options     md.Options
-	fallback    Theme
-	reveal      Reveal
-	session     *Session
-	unsubscribe func()
-}
+	externalNotes map[string]*Node
 
+	autoVirtual *VirtualState
+	shownSource string
+
+	props                                Props
+	fallback                             Theme
+	services                             ui.Services
+	dark                                 bool
+	inline                               map[[32]byte]*rasterState
+	richOptions                          RichOptions
+	richRevision                         atomic.Uint64
+	jobs                                 atomic.Int64
+	session                              *Session
+	unsubscribe                          func()
+	generation                           uint64
+	contentGeneration                    uint64
+	doc                                  *Document
+	builder                              nodeBuilder
+	nodes                                []*Node
+	reveal                               revealState
+	receiving, revealing, fading         bool
+	source, rawSource, transformedSource string
+	transformReady                       bool
+	parseRevision                        uint64
+	lastParsedStreaming                  bool
+	lastHookSource                       string
+	settledFired, finalFired             bool
+	anchor                               string
+	anchorVersion                        uint64
+	notes                                map[string]int
+	sources                              map[uint64]sourceRegion
+	images                               map[string]*imageState
+	virtual                              *VirtualState
+	tableWidths                          map[string][]float32
+}
+type sourceRegion struct {
+	source     string
+	start, end int
+}
+type ownerState struct{ view *viewState }
+
+func newView() *viewState {
+	return &viewState{notes: map[string]int{}, sources: map[uint64]sourceRegion{}, tableWidths: map[string][]float32{}}
+}
 func (v *viewState) Close() error {
 	if v.unsubscribe != nil {
 		v.unsubscribe()
 		v.unsubscribe = nil
 	}
+	for _, entry := range v.inline {
+		entry.Close()
+	}
+	v.inline = nil
+	for _, entry := range v.images {
+		entry.Close()
+	}
+	v.images = nil
 	return nil
 }
-func newView() *viewState {
-	v := &viewState{reveal: Reveal{Unit: ByCharacter, CatchUp: 120 * time.Millisecond, Fade: 180 * time.Millisecond}}
-	v.options.CodeBlock = func(c *ui.Context, b *CodeBlock) {
-		p := &v.props
-		if f := p.Code[strings.ToLower(b.Language)]; f != nil && (!b.Open || !p.Streaming || p.RenderOpenCode) {
-			f(c, b)
-			return
-		}
-		if p.CodeBlock != nil {
-			p.CodeBlock(c, b)
-			return
-		}
-		if p.PlainCode {
-			b.Body(c)
-			return
-		}
-		if p.CodeOptions != nil {
-			RenderCode(c, b, *p.CodeOptions)
-			return
-		}
-		md.DefaultCodeBlock(c, b)
-	}
-	return v
+func (v *viewState) reset() {
+	v.doc = nil
+	v.builder = nodeBuilder{}
+	v.reveal = revealState{}
+	v.transformReady = false
+	v.contentGeneration++
+	v.settledFired = false
+	v.finalFired = false
+	v.tableWidths = map[string][]float32{}
 }
-func (v *viewState) configure(p Props) {
+func View(c *ui.Context, source string, p Props) ui.Element { return buildView(c, source, p, nil) }
+func Stream(c *ui.Context, s *Session, p Props) ui.Element  { return buildView(c, "", p, s) }
+func buildView(c *ui.Context, source string, p Props, session *Session) ui.Element {
+	root := ui.Column(c).AlignSelf(ui.Stretch)
+	v := *ui.Local(root, "markstream", newView)
+	if v.session != session {
+		if v.unsubscribe != nil {
+			v.unsubscribe()
+			v.unsubscribe = nil
+		}
+		v.session = session
+		v.reset()
+		if session != nil {
+			v.unsubscribe = session.Subscribe(c.Services().Invalidate)
+		}
+	}
+	if session != nil {
+		snapshot := session.Snapshot()
+		source = snapshot.Source
+		p.Streaming = !snapshot.Done()
+		if snapshot.Generation != v.generation {
+			v.generation = snapshot.Generation
+			v.reset()
+		}
+	}
+	if p.Document != nil {
+		source = p.Document.Source()
+	}
+	if p.Nodes != nil && source == "" {
+		var serialized strings.Builder
+		for _, n := range p.Nodes {
+			if n.Raw != "" {
+				serialized.WriteString(n.Raw)
+			} else {
+				serialized.WriteString(plainNodes([]*Node{n}))
+			}
+			serialized.WriteByte('\n')
+		}
+		source = serialized.String()
+	}
+	if source != v.source {
+		if !strings.HasPrefix(source, v.source) {
+			v.reset()
+		}
+		v.source = source
+		v.settledFired = false
+		v.finalFired = false
+	}
 	v.props = p
-	o := &v.options
-	o.Theme = p.Theme
-	if o.Theme == nil {
-		v.fallback = Theme{FontSize: 16, LineHeight: 1.7, CodeFont: "monospace"}
-		if p.Variant == ChatStyle {
-			v.fallback.FontSize = 14
-			v.fallback.LineHeight = 1.55
-			v.fallback.BlockSpacing = 0.55
+	v.fallback = resolveTheme(c, p)
+	v.services = c.Services()
+	v.dark = c.Theme().Dark
+	v.receiving = p.Streaming
+	if p.Emoji && p.EmojiAliases == nil {
+		v.props.EmojiAliases = emoji.CodeMap()
+	}
+	if p.SourceTransform != nil {
+		if !v.transformReady || v.rawSource != source || v.parseRevision != p.ParseRevision {
+			v.transformedSource = p.SourceTransform(source)
+			v.rawSource = source
+			v.transformReady = true
 		}
-		o.Theme = &v.fallback
+		source = v.transformedSource
 	}
-	o.Extensions = p.Extensions
-	if o.Extensions == 0 {
-		o.Extensions = DefaultExtensions
-	}
-	o.Reveal = p.Reveal
-	if o.Reveal == nil {
-		o.Reveal = &v.reveal
-	}
-	// Leave default handling to MyGo when no callback is provided.
-	if p.OnLink == nil {
-		o.OnLink = nil
+	shown, pending, fading := v.reveal.step(c, source, p.Streaming, p.Reveal)
+	v.revealing = pending
+	v.fading = fading
+	showStreaming := p.Streaming || pending
+	changed := v.doc == nil || v.lastHookSource != shown || v.lastParsedStreaming != showStreaming || v.parseRevision != p.ParseRevision
+	if p.Nodes != nil {
+		if v.doc == nil {
+			v.doc = NewDocument(p.Extensions)
+		}
+		v.revealing = false
+		v.fading = false
+		shown = source
+	} else if p.Document != nil {
+		if v.doc != p.Document {
+			v.builder = nodeBuilder{}
+		}
+		v.doc = p.Document
+		shown = source
+		v.revealing = false
+		v.fading = false
 	} else {
-		o.OnLink = v.openLink
+		ext := p.Extensions
+		if ext == 0 {
+			ext = DefaultExtensions
+		}
+		if v.doc == nil || v.doc.Extensions() != ext {
+			v.doc = NewDocument(ext)
+			v.builder = nodeBuilder{}
+		}
+		v.doc.SetStreaming(showStreaming)
+		old := v.doc.Source()
+		if shown != old {
+			if strings.HasPrefix(shown, old) {
+				v.doc.Append(shown[len(old):])
+			} else {
+				v.doc.Set(shown)
+				v.builder = nodeBuilder{}
+			}
+		}
 	}
-	o.LoadImage = p.LoadImage
-	o.WrapCode = p.WrapCode
-	o.Math = p.Math
-	o.InlineMath = p.InlineMath
-	o.HTML = p.HTML
-	o.Block = p.Block
-	o.Anchor = p.Anchor
-	o.AnchorVersion = p.AnchorVersion
-	o.ShareSelection = p.ShareSelection
+	if changed && p.DocumentTransform != nil {
+		p.DocumentTransform(v.doc)
+		v.builder.cache = nil
+	}
+	v.lastHookSource = shown
+	v.lastParsedStreaming = showStreaming
+	v.parseRevision = p.ParseRevision
+	if changed || v.nodes == nil || p.Document != nil {
+		v.nodes = v.builder.build(v.doc)
+		if p.TransformNodes != nil {
+			v.nodes = p.TransformNodes(cloneNodes(v.nodes))
+		}
+	}
+	v.externalNotes = nil
+	if p.Nodes != nil {
+		v.externalNotes = map[string]*Node{}
+		v.nodes = nil
+		for _, n := range keyedNodes(p.Nodes, "node") {
+			if n.Type == "footnote_definition" || n.Type == "footnote" {
+				v.externalNotes[n.Label] = n
+			} else {
+				v.nodes = append(v.nodes, n)
+			}
+		}
+	}
+	limit := p.MaxLiveNodes
+	if limit == 0 {
+		limit = 220
+	}
+	if p.Virtual == nil && !p.DisableVirtualization && limit > 0 && len(v.nodes) > limit {
+		if v.autoVirtual == nil {
+			v.autoVirtual = &VirtualState{}
+		}
+		p.Virtual = v.autoVirtual
+		v.props.Virtual = p.Virtual
+		_, h := c.Size()
+		root.Height(max(160, h-80))
+	}
+	v.shownSource = shown
+	v.configureRich(c)
+	if v.props.LoadImage == nil && !p.DisableImages {
+		o := ImageOptions{}
+		if p.ImageOptions != nil {
+			o = *p.ImageOptions
+		}
+		var renderer RichRenderer
+		if p.Rich != nil {
+			renderer = p.Rich.Renderer
+		}
+		v.props.LoadImage = ImageLoader(o, renderer)
+	}
+	v.prepareFootnotes()
+	if p.Anchor != "" && (p.Anchor != v.anchor || p.AnchorVersion != v.anchorVersion) {
+		v.anchor = strings.TrimPrefix(p.Anchor, "#")
+		v.anchorVersion = p.AnchorVersion
+	}
+	if p.Virtual != nil {
+		if p.Virtual != v.autoVirtual {
+			root.Fill()
+		}
+		p.Virtual.MeasurementKey = layoutKey(v)
+	}
+	root.FontSize(v.fallback.FontSize).LineHeight(v.fallback.LineHeight).TextColor(v.fallback.Text)
+	if v.fallback.Font != "" {
+		root.Font(v.fallback.Font)
+	}
+	if !p.ShareSelection {
+		root.Selectable().CopyData(func(parts []ui.SelectedText) transfer.Data { return v.copySelection(parts) })
+	}
+	v.sources = map[uint64]sourceRegion{}
+	root.Children(func() {
+		if p.Virtual != nil {
+			v.virtual = p.Virtual
+			p.Virtual.render(c, v, v.renderNodes())
+		} else {
+			v.virtual = nil
+			for _, n := range v.renderNodes() {
+				v.renderNode(c, n)
+			}
+		}
+	})
+	ui.Local(root, "markstream-owner", func() ownerState { return ownerState{v} })
+	v.progress(source, p.Streaming, root)
+	return root
 }
-func (v *viewState) openLink(dest string) {
-	if SafeLink(dest) {
-		v.props.OnLink(dest)
+func Revealed(el ui.Element) bool {
+	owner := ui.Local(el, "markstream-owner", func() ownerState { return ownerState{} })
+	if owner.view == nil {
+		return false
+	}
+	v := owner.view
+	return !v.revealing && !v.fading && v.jobs.Load() == 0
+}
+func (v *viewState) progress(source string, receiving bool, el ui.Element) {
+	status := RenderStatus{Receiving: receiving, Revealing: v.revealing || v.fading, Pending: int(v.jobs.Load())}
+	status.Settled = !status.Revealing && status.Pending == 0
+	status.Final = status.Settled && !receiving
+	if v.props.Virtual != nil {
+		status.Metrics = v.props.Virtual.Metrics()
+	}
+	if v.props.OnUpdate != nil {
+		v.props.OnUpdate(status)
+	}
+	if status.Settled && !v.settledFired {
+		v.settledFired = true
+		if v.props.OnSettled != nil {
+			v.props.OnSettled(status)
+		}
+	}
+	if status.Final && !v.finalFired {
+		v.finalFired = true
+		if v.props.OnFinal != nil {
+			v.props.OnFinal(status)
+		}
 	}
 }
-
-// SafeLink accepts web/mail links, anchors and relative application routes. It
-// rejects executable/local schemes, control characters and backslash ambiguity.
-// The same policy protects custom OnLink callbacks; HTML is never executed.
 func SafeLink(dest string) bool {
 	if strings.ContainsAny(dest, "\\") || strings.IndexFunc(dest, unicode.IsControl) >= 0 {
 		return false
@@ -171,73 +388,11 @@ func SafeLink(dest string) bool {
 	return false
 }
 
-// View renders Markdown using native MyGo controls, without a browser. Keep it
-// at the same keyed position while Streaming changes to false to drain reveal
-// animation and preserve selection and completed-block caches.
-func View(c *ui.Context, source string, p Props) ui.Element {
-	root := ui.Column(c).AlignSelf(ui.Stretch)
-	v := ui.Local(root, "markstream", newView)
-	(*v).configure(p)
-	return (*v).build(c, root, source, p.Streaming, nil)
-}
-func (v *viewState) build(c *ui.Context, root ui.Element, source string, streaming bool, key any) ui.Element {
-	var result ui.Element
-	root.Children(func() {
-		if key != nil {
-			c.Key(key)
-		}
-		if streaming {
-			result = md.Stream(c, source, &v.options)
-		} else {
-			result = md.View(c, source, &v.options)
-		}
-	})
-	return result
-}
-
-// Stream renders a thread-safe session and subscribes to its wake-ups. The
-// subscription is removed when MyGo drops the view. Finalized/canceled/failed
-// sessions render strictly, while any queued reveal animation finishes.
-func Stream(c *ui.Context, s *Session, p Props) ui.Element {
-	root := ui.Column(c).AlignSelf(ui.Stretch)
-	v := ui.Local(root, "markstream", newView)
-	if (*v).session != s {
-		(*v).Close()
-		(*v).session = s
-		if s != nil {
-			(*v).unsubscribe = s.Subscribe(c.Services().Invalidate)
-		}
-	}
-	if s == nil {
-		p.Streaming = false
-		(*v).configure(p)
-		return (*v).build(c, root, "", false, nil)
-	}
-	snapshot := s.Snapshot()
-	p.Streaming = !snapshot.Done()
-	(*v).configure(p)
-	return (*v).build(c, root, snapshot.Source, p.Streaming, struct {
-		Session    *Session
-		Generation uint64
-	}{s, snapshot.Generation})
-}
-
-// Revealed reports that the view has displayed and faded in all received text.
-// A stream is complete only when its Snapshot.Done() AND Revealed are true.
-func Revealed(el ui.Element) bool { return md.Revealed(el) }
-
-// Message is one stable row of a conversation. IDs must be unique and nonempty.
-// Session, if nonnil, takes precedence over Source.
 type Message struct {
-	ID      string
-	Source  string
-	Session *Session
+	ID, Source string
+	Session    *Session
 }
 
-// Messages builds only visible messages (plus native overscan), with variable
-// row heights and stable anchors. Set state.FollowEnd=true for chat following;
-// scrolling away pauses following. Keep state for the lifetime of the list.
-// Virtualization is per message, not per block of one large document.
 func Messages(c *ui.Context, state *ui.ListState, messages []Message, p Props) ui.Element {
 	state.Key = func(i int) any { return messages[i].ID }
 	return ui.List(c, state, len(messages), func(i int) {
@@ -250,4 +405,30 @@ func Messages(c *ui.Context, state *ui.ListState, messages []Message, p Props) u
 			}
 		})
 	})
+}
+func (v *viewState) note(el ui.Element, n *Node) {
+	source := v.doc.Source()
+	if n.LocalSource != "" {
+		source = n.LocalSource
+	}
+	v.sources[el.ID()] = sourceRegion{source, n.Start, n.End}
+}
+func (v *viewState) copySelection(parts []ui.SelectedText) transfer.Data {
+	var plain, html strings.Builder
+	for i, p := range parts {
+		runes := []rune(p.Text)
+		a, b := max(0, p.Start), min(len(runes), p.End)
+		if b < a {
+			continue
+		}
+		if i > 0 {
+			plain.WriteByte('\n')
+		}
+		plain.WriteString(string(runes[a:b]))
+	}
+	text := plain.String()
+	html.WriteString("<pre>")
+	html.WriteString(strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(text))
+	html.WriteString("</pre>")
+	return selectionData(text, html.String(), v.source)
 }

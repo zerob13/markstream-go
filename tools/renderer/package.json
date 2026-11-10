@@ -1,0 +1,1 @@
+{"name":"markstream-go-renderer-assets","private":true,"type":"module","scripts":{"build":"node build.mjs"},"dependencies":{"@antv/infographic":"0.2.3","@terrastruct/d2":"0.1.33","dompurify":"3.3.3","eventemitter3":"5.0.1","katex":"0.16.25","mermaid":"11.12.2"},"devDependencies":{"esbuild":"0.28.0"}}

@@ -9,6 +9,8 @@ import (
 // CodeOptions configures the native code surface. Zero values retain the built-in
 // highlighted, selectable body and Copy action. Language renderers take priority.
 type CodeOptions struct {
+	File *FileOptions
+
 	Collapsible      bool
 	DefaultCollapsed bool
 	// MaxHeight bounds the body with a vertical scroll container (DIPs).
@@ -57,10 +59,22 @@ func RenderCode(c *ui.Context, b *CodeBlock, o CodeOptions) ui.Element {
 			ui.Text(c, "Code collapsed").Padding(8, 12).TextColor(th.TextMuted).Unselectable()
 			return
 		}
+		fileOptions := FileOptions{}
+		if o.File != nil {
+			fileOptions = *o.File
+		}
 		if o.MaxHeight > 0 {
-			ui.Scroll(c).MaxHeight(o.MaxHeight).AlignSelf(ui.Stretch).Children(func() { b.Body(c) })
+			fileOptions.MaxHeight = o.MaxHeight
+		}
+		if b.Language == "diff" || b.Language == "patch" {
+			fileOptions.Streaming = b.Open
+			fields := strings.Fields(b.Info)
+			if len(fields) > 1 {
+				fileOptions.Language = fields[1]
+			}
+			diffBody(c, b.Code(), fileOptions)
 		} else {
-			b.Body(c)
+			fileBody(c, FileData{Language: b.Language, Content: b.Code(), Streaming: b.Open}, fileOptions, b.NoteElement)
 		}
 	})
 }
