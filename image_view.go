@@ -13,10 +13,9 @@ type imageState struct {
 }
 
 func (s *imageState) Close() error { s.mu.Lock(); s.closed = true; s.mu.Unlock(); return nil }
-func (v *viewState) image(c *ui.Context, n *Node, inline bool) {
+func (v *viewState) loadImage(c *ui.Context, n *Node) (ui.ImageSource, error) {
 	if v.props.LoadImage == nil {
-		ui.Text(c, n.Label).TextColor(v.fallback.Muted)
-		return
+		return nil, nil
 	}
 	if v.images == nil {
 		v.images = map[string]*imageState{}
@@ -52,17 +51,9 @@ func (v *viewState) image(c *ui.Context, n *Node, inline bool) {
 	entry.mu.Lock()
 	source, err := entry.source, entry.err
 	entry.mu.Unlock()
-	if source == nil {
-		label := n.Label
-		if label == "" {
-			label = "Image"
-		}
-		el := ui.Text(c, label).Role(ui.RoleImage).Label(label)
-		if err != nil {
-			el.Tooltip(err.Error())
-		}
-		return
-	}
+	return source, err
+}
+func imageSize(source ui.ImageSource) (float32, float32) {
 	width, height := float32(100), float32(80)
 	switch image := source.(type) {
 	case *ui.Bitmap:
@@ -71,12 +62,22 @@ func (v *viewState) image(c *ui.Context, n *Node, inline bool) {
 	case *ui.SVG:
 		width, height = image.Size()
 	}
-	if inline {
-		h := min(height, v.fallback.FontSize*2)
-		w := width * h / height
-		ui.RichText(c, ui.Span{Text: "\uFFFC", ObjectWidth: w, ObjectHeight: h}).Label(n.Label).DrawObjects(func(p *ui.Painter, _ int, r ui.Rect) { p.Image(source, r, ui.Contain) })
+	return width, height
+}
+func (v *viewState) image(c *ui.Context, n *Node, inline bool) {
+	source, err := v.loadImage(c, n)
+	if source == nil {
+		label := n.Label
+		if label == "" {
+			label = v.label("Image")
+		}
+		el := ui.Text(c, label).Role(ui.RoleImage).Label(label)
+		if err != nil {
+			el.Tooltip(err.Error())
+		}
 		return
 	}
+	width, height := imageSize(source)
 	root := ui.Column(c).AlignSelf(ui.Stretch)
 	open := ui.Local(root, "image-preview", func() bool { return false })
 	zoom := ui.Local(root, "image-zoom", func() float32 { return 1 })
@@ -100,7 +101,7 @@ func (v *viewState) image(c *ui.Context, n *Node, inline bool) {
 					if ui.Button(c, "+").Clicked() {
 						*zoom = min(8, *zoom*1.2)
 					}
-					if ui.Button(c, "Close image").Clicked() {
+					if ui.Button(c, v.label("Close image")).Clicked() {
 						*open = false
 					}
 				})

@@ -36,6 +36,7 @@ type VirtualState struct {
 	MeasurementKey  string
 	heights         map[int]HeightEntry
 	signature       string
+	signatureSource string
 	width           float32
 	anchor          int
 	offset          float32
@@ -67,14 +68,23 @@ func contentHash(s string) string {
 	return hex.EncodeToString(hash[:12])
 }
 func (v *VirtualState) render(c *ui.Context, owner *viewState, nodes []*Node) ui.Element {
-	v.signature = contentHash(owner.shownSource)
+	if v.signatureSource != owner.shownSource || v.signature == "" {
+		v.signature = contentHash(owner.shownSource)
+		v.signatureSource = owner.shownSource
+	}
 	if v.heights == nil || v.lastMeasurement != v.MeasurementKey {
 		v.heights = map[int]HeightEntry{}
 		v.lastMeasurement = v.MeasurementKey
 	}
-	if v.restore != nil && v.restorePhase == 0 {
+	// Adopt an intra-row offset before TrackScroll reads it. Assignments after
+	// list construction are overwritten by the native layout's tracked state.
+	if v.restore != nil && v.restorePhase == 2 {
+		v.Scroll.Y += v.restore.Offset
+		v.restorePhase = 3
+	}
+	if v.restore != nil && v.restorePhase == 0 && v.width > 0 {
 		saved := v.restore
-		if saved.ContentHash == v.signature && saved.MeasurementKey == v.MeasurementKey {
+		if saved.ContentHash == v.signature && saved.MeasurementKey == v.MeasurementKey && saved.Width == v.width {
 			v.List.ScrollTo(min(max(saved.Anchor, 0), max(len(nodes)-1, 0)), ui.Start)
 			v.restorePhase = 1
 			for _, h := range saved.Heights {
@@ -115,13 +125,15 @@ func (v *VirtualState) render(c *ui.Context, owner *viewState, nodes []*Node) ui
 		if v.restore != nil && v.restore.Width != v.width {
 			v.restore = nil
 		}
+		if v.restore != nil {
+			c.Invalidate()
+		}
 	}
 	v.bounds = bounds
 	if v.restore != nil && v.restorePhase == 1 && first == v.restore.Anchor {
-		v.Scroll.Y += v.restore.Offset
 		v.restorePhase = 2
 		c.Invalidate()
-	} else if v.restorePhase == 2 {
+	} else if v.restorePhase == 3 {
 		v.restore = nil
 		v.restorePhase = 0
 	}

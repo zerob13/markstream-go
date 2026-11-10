@@ -3,11 +3,12 @@ package markstream
 import "context"
 
 type RichRequest struct {
-	Kind     string  `json:"kind"`
-	Source   string  `json:"source"`
-	Dark     bool    `json:"dark"`
-	Width    int     `json:"width"`
-	FontSize float32 `json:"fontSize"`
+	Config   map[string]any `json:"config,omitempty"`
+	Kind     string         `json:"kind"`
+	Source   string         `json:"source"`
+	Dark     bool           `json:"dark"`
+	Width    int            `json:"width"`
+	FontSize float32        `json:"fontSize"`
 }
 type RichLink struct {
 	URL                 string `json:"url"`
@@ -15,6 +16,7 @@ type RichLink struct {
 	X, Y, Width, Height float32
 }
 type RichResult struct {
+	Source string     `json:"-"`
 	PNG    []byte     `json:"-"`
 	SVG    string     `json:"svg"`
 	Plain  string     `json:"plain"`
@@ -34,6 +36,10 @@ type Export struct {
 	Data                 []byte
 }
 type RichOptions struct {
+	// Config contains per-kind engine options (e.g. math macros or Mermaid themeVariables).
+	// Sandbox, sanitization and resource limits remain enforced by the bundled engine.
+	Config   map[string]map[string]any
+	Labels   Labels
 	onWork   func(int)
 	OnRender func(RichRenderState)
 

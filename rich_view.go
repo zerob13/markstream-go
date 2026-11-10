@@ -29,6 +29,9 @@ type rasterState struct {
 	bitmap                 *ui.Bitmap
 	showSource, fullscreen bool
 	zoom                   float32
+	fit                    bool
+	fullZoom               float32
+	fullScroll             ui.ScrollState
 	scroll                 ui.ScrollState
 	emitted                uint64
 	pan                    bool
@@ -69,6 +72,7 @@ func (s *rasterState) load(r RichRequest, renderer RichRenderer, wake func(), on
 		s.mu.Lock()
 		if !s.closed {
 			if err == nil {
+				result.Source = r.Source
 				s.result = result
 			}
 			s.err = err
@@ -102,12 +106,15 @@ func (s *rasterState) snapshot() (RichResult, *ui.Bitmap, error, bool) {
 func RichView(c *ui.Context, r RichRequest, o RichOptions) ui.Element { return richView(c, r, o, nil) }
 func richView(c *ui.Context, r RichRequest, o RichOptions, fallback func()) ui.Element {
 	root := ui.Column(c).AlignSelf(ui.Stretch).Gap(6)
-	state := *ui.Local(root, "rich", func() *rasterState { return &rasterState{zoom: 1} })
+	state := *ui.Local(root, "rich", func() *rasterState { return &rasterState{zoom: 1, fit: true} })
 	if r.Width == 0 {
 		r.Width = o.Width
 	}
 	if r.Width == 0 {
 		r.Width = 900
+		if width := root.Bounds().W; width > 100 {
+			r.Width = int(width)
+		}
 	}
 	if r.FontSize == 0 {
 		r.FontSize = 16
@@ -117,6 +124,17 @@ func richView(c *ui.Context, r RichRequest, o RichOptions, fallback func()) ui.E
 		state.load(r, o.Renderer, c.Services().Invalidate, o.onWork)
 	}
 	out, bitmap, err, busy := state.snapshot()
+	if bitmap != nil && state.fit {
+		width := root.Bounds().W
+		if width <= 0 {
+			width = float32(r.Width)
+		}
+		height := o.MaxHeight
+		if height <= 0 {
+			height = 500
+		}
+		state.zoom = min(1, width/out.Width, height/out.Height)
+	}
 	if state.emitted != state.painted {
 		state.emitted = state.painted
 		if o.OnRender != nil {
@@ -124,35 +142,40 @@ func richView(c *ui.Context, r RichRequest, o RichOptions, fallback func()) ui.E
 		}
 	}
 	root.Children(func() {
-		ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
+		ui.Row(c).Wrap().Gap(6).AlignItems(ui.Center).Children(func() {
 			ui.Text(c, r.Kind).FontSize(12).TextColor(c.Theme().TextMuted)
 			ui.Spacer(c)
 			label := "Source"
 			if state.showSource {
 				label = "Preview"
 			}
-			if ui.Button(c, label).Clicked() {
+			if ui.Button(c, tr(o.Labels, label)).Clicked() {
 				state.showSource = !state.showSource
 			}
 			if ui.Button(c, "−").Disabled(bitmap == nil).Clicked() {
+				state.fit = false
 				state.zoom = max(.2, state.zoom/1.2)
 			}
 			if ui.Button(c, "+").Disabled(bitmap == nil).Clicked() {
+				state.fit = false
 				state.zoom = min(8, state.zoom*1.2)
 			}
-			if ui.Button(c, "Fit").Disabled(bitmap == nil).Clicked() {
+			if ui.Button(c, tr(o.Labels, "Fit")).Disabled(bitmap == nil).Clicked() {
+				state.fit = true
 				state.zoom = 1
 				state.scroll.X = 0
 				state.scroll.Y = 0
 			}
-			if ui.Button(c, "Fullscreen").Disabled(bitmap == nil).Clicked() {
+			if ui.Button(c, tr(o.Labels, "Fullscreen")).Disabled(bitmap == nil).Clicked() {
 				state.fullscreen = true
+				w, h := c.Size()
+				state.fullZoom = min(1, (w-64)/out.Width, (h-140)/out.Height)
 			}
 			if ui.Button(c, "SVG").Disabled(out.SVG == "").Clicked() {
-				exportRich(o, Export{r.Kind, "svg", r.Source, []byte(out.SVG)})
+				exportRich(o, Export{r.Kind, "svg", out.Source, []byte(out.SVG)})
 			}
 			if ui.Button(c, "PNG").Disabled(len(out.PNG) == 0).Clicked() {
-				exportRich(o, Export{r.Kind, "png", r.Source, out.PNG})
+				exportRich(o, Export{r.Kind, "png", out.Source, out.PNG})
 			}
 		})
 		if state.showSource || bitmap == nil {
@@ -188,12 +211,12 @@ func richView(c *ui.Context, r RichRequest, o RichOptions, fallback func()) ui.E
 			}
 		}
 		if busy {
-			ui.Text(c, "Rendering…").FontSize(11).TextColor(c.Theme().TextMuted)
+			ui.Text(c, tr(o.Labels, "Rendering…")).FontSize(11).TextColor(c.Theme().TextMuted)
 		}
 		if err != nil {
 			ui.Row(c).Gap(8).Children(func() {
 				ui.Text(c, err.Error()).FontSize(11).TextColor(c.Theme().Danger)
-				if ui.Button(c, "Retry").Clicked() {
+				if ui.Button(c, tr(o.Labels, "Retry")).Clicked() {
 					state.request = RichRequest{}
 
 					c.Invalidate()
@@ -205,12 +228,22 @@ func richView(c *ui.Context, r RichRequest, o RichOptions, fallback func()) ui.E
 				ui.Row(c).Children(func() {
 					ui.Text(c, r.Kind).Bold()
 					ui.Spacer(c)
-					if ui.Button(c, "Close preview").Clicked() {
+					if ui.Button(c, "−").Clicked() {
+						state.fullZoom = max(.2, state.fullZoom/1.2)
+					}
+					if ui.Button(c, "+").Clicked() {
+						state.fullZoom = min(8, state.fullZoom*1.2)
+					}
+					if ui.Button(c, tr(o.Labels, "Fit")).Clicked() {
+						w, h := c.Size()
+						state.fullZoom = min(1, (w-64)/out.Width, (h-140)/out.Height)
+					}
+					if ui.Button(c, tr(o.Labels, "Close preview")).Clicked() {
 						state.fullscreen = false
 					}
 				})
 				if bitmap != nil {
-					ui.ScrollBoth(c).Fill().Children(func() { ui.Image(c, bitmap).Size(out.Width*state.zoom, out.Height*state.zoom).Label(out.Plain) })
+					ui.ScrollBoth(c).TrackScroll(&state.fullScroll).Fill().Children(func() { ui.Image(c, bitmap).Size(out.Width*state.fullZoom, out.Height*state.fullZoom).Label(out.Plain) })
 				}
 			})
 		})
@@ -218,7 +251,7 @@ func richView(c *ui.Context, r RichRequest, o RichOptions, fallback func()) ui.E
 	return root
 }
 func (v *viewState) inlineMath(tex string, size float32) (InlineObject, bool) {
-	r := RichRequest{Kind: "inline-math", Source: tex, Dark: v.dark, FontSize: size, Width: 1024}
+	r := RichRequest{Kind: "inline-math", Source: tex, Dark: v.dark, FontSize: size, Width: 1024, Config: v.props.Rich.Config["math"]}
 	key := requestKey(r)
 	if v.inline == nil {
 		v.inline = map[[32]byte]*rasterState{}
@@ -254,7 +287,7 @@ func richLanguage(lang string) string {
 	return ""
 }
 func (v *viewState) richRequest(kind, source string) RichRequest {
-	return RichRequest{Kind: kind, Source: source, Width: v.props.Rich.Width, FontSize: v.fallback.FontSize, Dark: v.dark}
+	return RichRequest{Kind: kind, Source: source, Width: v.props.Rich.Width, FontSize: v.fallback.FontSize, Dark: v.dark, Config: v.props.Rich.Config[kind]}
 }
 func (v *viewState) configureRich(c *ui.Context) {
 	v.services = c.Services()
@@ -263,9 +296,16 @@ func (v *viewState) configureRich(c *ui.Context) {
 		return
 	}
 	v.richOptions = *v.props.Rich
+	if v.richOptions.Labels == nil {
+		v.richOptions.Labels = v.props.Labels
+	}
 	services := c.Services()
 	v.richOptions.onWork = func(delta int) {
 		v.jobs.Add(int64(delta))
+		if delta > 0 {
+			v.settledFired = false
+			v.finalFired = false
+		}
 		if delta < 0 {
 			v.richRevision.Add(1)
 			services.Invalidate()

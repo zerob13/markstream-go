@@ -85,7 +85,7 @@ func diffBody(c *ui.Context, source string, o FileOptions) ui.Element {
 			if state.mode == Split {
 				label = "Unified"
 			}
-			if ui.Button(c, label).Clicked() {
+			if ui.Button(c, tr(o.Labels, label)).Clicked() {
 				if state.mode == Split {
 					state.mode = Unified
 				} else {
@@ -97,7 +97,7 @@ func diffBody(c *ui.Context, source string, o FileOptions) ui.Element {
 			if state.fold {
 				label = "Show unchanged"
 			}
-			if ui.Button(c, label).Clicked() {
+			if ui.Button(c, tr(o.Labels, label)).Clicked() {
 				state.fold = !state.fold
 				c.Invalidate()
 			}

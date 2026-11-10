@@ -127,6 +127,9 @@ func (e *Engine) start() error {
 		e.cancel()
 		e.allocCancel()
 		e.ctx = nil
+		if e.server != nil {
+			e.server.Close()
+		}
 		return err
 	}
 	return nil
@@ -158,6 +161,9 @@ func (e *Engine) serve(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, z)
 }
 func (e *Engine) Render(ctx context.Context, r ms.RichRequest) (ms.RichResult, error) {
+	if err := ctx.Err(); err != nil {
+		return ms.RichResult{}, err
+	}
 	if len(r.Source) > 1<<20 {
 		return ms.RichResult{}, errors.New("rich: source exceeds 1 MiB")
 	}
@@ -167,7 +173,10 @@ func (e *Engine) Render(ctx context.Context, r ms.RichRequest) (ms.RichResult, e
 	if r.Width > 4096 {
 		return ms.RichResult{}, errors.New("rich: width exceeds 4096")
 	}
-	data, _ := json.Marshal(r)
+	data, marshalErr := json.Marshal(r)
+	if marshalErr != nil {
+		return ms.RichResult{}, fmt.Errorf("rich: invalid configuration: %w", marshalErr)
+	}
 	key := sha256.Sum256(data)
 	select {
 	case e.gate <- struct{}{}:
@@ -179,7 +188,7 @@ func (e *Engine) Render(ctx context.Context, r ms.RichRequest) (ms.RichResult, e
 		return ms.RichResult{}, err
 	}
 	if result, ok := e.cache[key]; ok {
-		return result, nil
+		return cloneResult(result), nil
 	}
 	if e.tab == nil {
 		e.tab = e.ctx
@@ -207,10 +216,13 @@ func (e *Engine) Render(ctx context.Context, r ms.RichRequest) (ms.RichResult, e
 		}))
 	}
 	if err != nil {
-		e.tabCancel()
-		e.tab = nil
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			e.tabCancel()
+			e.tab = nil
+		}
 		return ms.RichResult{}, fmt.Errorf("rich: %s: %w", r.Kind, err)
 	}
+	out.Source = r.Source
 	if len(out.PNG) > 16<<20 {
 		return ms.RichResult{}, errors.New("rich: image exceeds 16 MiB")
 	}
@@ -222,9 +234,15 @@ func (e *Engine) Render(ctx context.Context, r ms.RichRequest) (ms.RichResult, e
 			delete(e.cache, e.order[0])
 			e.order = e.order[1:]
 		}
-		e.cache[key] = out
+		e.cache[key] = cloneResult(out)
 		e.cacheBytes += cost
 		e.order = append(e.order, key)
 	}
 	return out, nil
+}
+
+func cloneResult(result ms.RichResult) ms.RichResult {
+	result.PNG = append([]byte(nil), result.PNG...)
+	result.Links = append([]ms.RichLink(nil), result.Links...)
+	return result
 }

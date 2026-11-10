@@ -63,7 +63,7 @@ func resolveTheme(c *ui.Context, p Props) Theme {
 		if o.CodeLineHeight > 0 {
 			t.CodeLineHeight = o.CodeLineHeight
 		}
-		for _, pair := range [][2]*ui.Color{{&t.Text, &o.Text}, {&t.Muted, &o.Muted}, {&t.Link, &o.Link}, {&t.Strong, &o.Strong}, {&t.Code, &o.Code}, {&t.CodeBackground, &o.CodeBackground}, {&t.QuoteBar, &o.QuoteBar}, {&t.QuoteText, &o.QuoteText}, {&t.Rule, &o.Rule}, {&t.TableBorder, &o.TableBorder}, {&t.TableHeader, &o.TableHeader}, {&t.TableStripe, &o.TableStripe}, {&t.Mark, &o.Mark}, {&t.Checkbox, &o.Checkbox}} {
+		for _, pair := range [][2]*ui.Color{{&t.Text, &o.Text}, {&t.Muted, &o.Muted}, {&t.Link, &o.Link}, {&t.Strong, &o.Strong}, {&t.Code, &o.Code}, {&t.CodeBackground, &o.CodeBackground}, {&t.QuoteBar, &o.QuoteBar}, {&t.QuoteText, &o.QuoteText}, {&t.Rule, &o.Rule}, {&t.TableBorder, &o.TableBorder}, {&t.TableHeader, &o.TableHeader}, {&t.TableStripe, &o.TableStripe}, {&t.Mark, &o.Mark}, {&t.Checkbox, &o.Checkbox}, {&t.CodeBlockBackground, &o.CodeBlockBackground}, {&t.CodeBlockBorder, &o.CodeBlockBorder}} {
 			if pair[1].A > 0 {
 				*pair[0] = *pair[1]
 			}
@@ -92,7 +92,29 @@ func resolveTheme(c *ui.Context, p Props) Theme {
 		if o.TableCellPadding[0] > 0 {
 			t.TableCellPadding = o.TableCellPadding
 		}
+		if o.QuoteBarWidth > 0 {
+			t.QuoteBarWidth = o.QuoteBarWidth
+		}
+		if o.CodeBlockRadius > 0 {
+			t.CodeBlockRadius = o.CodeBlockRadius
+		}
+		if o.CodeBlockPadding > 0 {
+			t.CodeBlockPadding = o.CodeBlockPadding
+		}
+		t.CodeColors = o.CodeColors
+		for i, color := range o.Alerts {
+			if color.A > 0 {
+				t.Alerts[i] = color
+			}
+		}
 		for i, h := range o.Headings {
+			t.Headings[i].Rule = h.Rule
+			if h.Top > 0 {
+				t.Headings[i].Top = h.Top
+			}
+			if h.Bottom > 0 {
+				t.Headings[i].Bottom = h.Bottom
+			}
 			if h.Size > 0 {
 				t.Headings[i].Size = h.Size
 			}

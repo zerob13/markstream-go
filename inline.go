@@ -22,11 +22,15 @@ type inlineEvent struct {
 	close  bool
 }
 type inlineWriter struct {
-	view   *viewState
-	root   ui.Element
-	source string
-	events map[int]inlineEvent
-	tags   []string
+	view      *viewState
+	root      ui.Element
+	source    string
+	events    map[int]inlineEvent
+	tags      []string
+	runeAt    int
+	objects   map[int]InlineObject
+	fragments []selectionFragment
+	link      string
 }
 
 func (v *viewState) paragraph(c *ui.Context, n *Node, style inlineStyle) ui.Element {
@@ -35,9 +39,17 @@ func (v *viewState) paragraph(c *ui.Context, n *Node, style inlineStyle) ui.Elem
 		source = n.LocalSource
 	}
 	el := ui.RichText(c).AlignSelf(ui.Stretch)
-	w := inlineWriter{view: v, root: el, source: source, events: extensionEvents(n.Children, source, v.receiving || v.revealing)}
+	w := inlineWriter{view: v, root: el, source: source, objects: map[int]InlineObject{}, events: extensionEvents(n.Children, source, v.receiving || v.revealing)}
 	el.Children(func() { w.nodes(c, n.Children, style) })
+	el.DrawObjects(func(p *ui.Painter, at int, r ui.Rect) {
+		if object, ok := w.objects[at]; ok && object.Draw != nil {
+			object.Draw(p, r)
+		}
+	})
 	v.note(el, n)
+	region := v.sources[el.ID()]
+	region.fragments = w.fragments
+	v.sources[el.ID()] = region
 	return el
 }
 func (w *inlineWriter) styled(s inlineStyle) inlineStyle {
@@ -88,10 +100,42 @@ func (w *inlineWriter) text(c *ui.Context, text string, style inlineStyle) {
 	if style.mark {
 		span.Background = w.view.fallback.Mark
 	}
+	w.fragments = append(w.fragments, selectionFragment{text: text, style: style, link: w.link})
 	ui.RichText(c, span)
+	w.runeAt += utf8.RuneCountInString(text)
+}
+
+// segment applies opacity only to newly revealed source, leaving finished text stable.
+func (w *inlineWriter) segment(c *ui.Context, text string, style inlineStyle, start int) {
+	if len(w.view.reveal.runs) == 0 || start < 0 {
+		w.text(c, text, style)
+		return
+	}
+	end := start + len(text)
+	at := start
+	for _, run := range w.view.reveal.runs {
+		a, b := max(start, run.start), min(end, run.end)
+		if a >= b {
+			continue
+		}
+		if at < a {
+			w.text(c, text[at-start:a-start], style)
+		}
+		alpha := w.view.reveal.alpha(a, b, c.Now())
+		ui.RichText(c).Opacity(alpha).Children(func() { w.text(c, text[a-start:b-start], style) })
+		at = b
+	}
+	if at < end {
+		w.text(c, text[at-start:], style)
+	}
 }
 func (w *inlineWriter) nodes(c *ui.Context, nodes []*Node, style inlineStyle) {
 	for _, n := range nodes {
+		if renderer := w.view.props.NodeRenderers[n.Type]; renderer != nil {
+			renderer(c, n)
+			w.runeAt += utf8.RuneCountInString(plainNodes([]*Node{n}))
+			continue
+		}
 		switch n.Type {
 		case "text":
 			w.extended(c, n, style)
@@ -104,6 +148,7 @@ func (w *inlineWriter) nodes(c *ui.Context, nodes []*Node, style inlineStyle) {
 		case "strong":
 			next := style
 			next.weight = w.view.fallback.StrongWeight
+			next.color = w.view.fallback.Strong
 			w.nodes(c, n.Children, next)
 		case "strikethrough":
 			next := style
@@ -116,9 +161,10 @@ func (w *inlineWriter) nodes(c *ui.Context, nodes []*Node, style inlineStyle) {
 		case "link":
 			next := style
 			next.color = w.view.fallback.Link
+			next.weight = w.view.fallback.LinkWeight
 			label := plainNodes(n.Children)
 			el := ui.RichText(c).Role(ui.RoleLink).Label(label)
-			el.Children(func() { w.nodes(c, n.Children, next) })
+			el.Children(func() { old := w.link; w.link = n.URL; w.nodes(c, n.Children, next); w.link = old })
 			if el.Clicked() && !n.Loading && SafeLink(n.URL) {
 				if w.view.props.OnLink != nil {
 					w.view.props.OnLink(n.URL)
@@ -130,7 +176,13 @@ func (w *inlineWriter) nodes(c *ui.Context, nodes []*Node, style inlineStyle) {
 				}
 			}
 		case "image":
-			w.view.image(c, n, true)
+			if source, _ := w.view.loadImage(c, n); source != nil {
+				width, height := imageSize(source)
+				h := min(height, w.view.fallback.FontSize*2)
+				w.object(c, InlineObject{Width: width * h / height, Height: h, Draw: func(p *ui.Painter, r ui.Rect) { p.Image(source, r, ui.Contain) }}, n.Label)
+			} else {
+				w.text(c, n.Label, style)
+			}
 		case "math":
 			size := style.size
 			if size <= 0 {
@@ -145,6 +197,15 @@ func (w *inlineWriter) nodes(c *ui.Context, nodes []*Node, style inlineStyle) {
 			next := style
 			next.code = true
 			w.text(c, n.Content, next)
+		case "html_inline":
+			if renderer := w.view.props.CustomHTML[n.Label]; renderer != nil {
+				renderer(c, n)
+				w.runeAt += utf8.RuneCountInString(plainNodes(n.Children))
+			} else {
+				w.tag("<" + n.Label + ">")
+				w.nodes(c, n.Children, style)
+				w.tag("</" + n.Label + ">")
+			}
 		case "html":
 			if htmlTag(n.Content) == "br" {
 				w.text(c, "\n", style)
@@ -164,6 +225,10 @@ func (w *inlineWriter) nodes(c *ui.Context, nodes []*Node, style inlineStyle) {
 			next.shift = w.view.fallback.FontSize * .35
 			ref := ui.RichText(c).Role(ui.RoleLink).Label(text)
 			ref.Children(func() { w.text(c, text, next) })
+			if w.view.anchor == "footnote-ref:"+label {
+				ref.ScrollIntoView()
+				w.view.anchor = ""
+			}
 			if ref.Clicked() {
 				w.view.anchor = "footnote:" + label
 				w.view.scrollAnchor(c)
@@ -178,11 +243,10 @@ func (w *inlineWriter) nodes(c *ui.Context, nodes []*Node, style inlineStyle) {
 	}
 }
 func (w *inlineWriter) object(c *ui.Context, object InlineObject, label string) {
-	ui.RichText(c, ui.Span{Text: "\uFFFC", ObjectWidth: object.Width, ObjectHeight: object.Height, ObjectDescent: object.Depth}).Label(label).DrawObjects(func(p *ui.Painter, _ int, r ui.Rect) {
-		if object.Draw != nil {
-			object.Draw(p, r)
-		}
-	})
+	w.fragments = append(w.fragments, selectionFragment{text: "\uFFFC", markdown: "$" + label + "$"})
+	w.objects[w.runeAt] = object
+	w.runeAt++
+	ui.RichText(c, ui.Span{Text: "\uFFFC", ObjectWidth: object.Width, ObjectHeight: object.Height, ObjectDescent: object.Depth}).Label(label)
 }
 func (w *inlineWriter) tag(source string) bool {
 	tag := htmlTag(source)
@@ -205,13 +269,13 @@ func (w *inlineWriter) tag(source string) bool {
 }
 func (w *inlineWriter) extended(c *ui.Context, n *Node, style inlineStyle) {
 	if n.End-n.Start != len(n.Content) || n.Start < 0 || n.End > len(w.source) || w.source[n.Start:n.End] != n.Content {
-		w.text(c, n.Content, style)
+		w.segment(c, n.Content, style, n.Start)
 		return
 	}
 	start := 0
 	flush := func(end int) {
 		if end > start {
-			w.text(c, n.Content[start:end], style)
+			w.segment(c, n.Content[start:end], style, n.Start+start)
 		}
 	}
 	for i := 0; i < len(n.Content); {
@@ -257,7 +321,7 @@ func extensionEvents(nodes []*Node, source string, streaming bool) map[int]inlin
 				}
 				continue
 			}
-			if n.End-n.Start != len(n.Content) || n.End > len(source) || source[n.Start:n.End] != n.Content {
+			if n.End-n.Start != len(n.Content) || n.Start < 0 || n.End > len(source) || source[n.Start:n.End] != n.Content {
 				continue
 			}
 			for i := 0; i < len(n.Content); {
@@ -316,11 +380,23 @@ func extensionEvents(nodes []*Node, source string, streaming bool) map[int]inlin
 func (v *viewState) scrollAnchor(c *ui.Context) {
 	if v.virtual != nil {
 		for index, n := range v.renderNodes() {
-			if n.Type == "heading" && slug(plainNodes(n.Children)) == v.anchor || n.Type == "footnotes" && strings.HasPrefix(v.anchor, "footnote:") {
+			if n.Type == "heading" && slug(plainNodes(n.Children)) == v.anchor || n.Type == "footnotes" && strings.HasPrefix(v.anchor, "footnote:") || strings.HasPrefix(v.anchor, "footnote-ref:") && containsFootnoteReference(n, strings.TrimPrefix(v.anchor, "footnote-ref:")) {
 				v.virtual.ScrollTo(index, ui.Start)
 				break
 			}
 		}
 	}
 	c.Invalidate()
+}
+
+func containsFootnoteReference(n *Node, label string) bool {
+	if n.Type == "footnote_reference" && n.Content == label {
+		return true
+	}
+	for _, child := range n.Children {
+		if containsFootnoteReference(child, label) {
+			return true
+		}
+	}
+	return false
 }

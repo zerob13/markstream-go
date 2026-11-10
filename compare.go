@@ -85,7 +85,7 @@ func Compare(c *ui.Context, old, new FileData, o CompareOptions) ui.Element {
 			if state.mode == Split {
 				label = "Unified"
 			}
-			if ui.Button(c, label).Clicked() {
+			if ui.Button(c, tr(o.Labels, label)).Clicked() {
 				if state.mode == Split {
 					state.mode = Unified
 				} else {
@@ -97,11 +97,11 @@ func Compare(c *ui.Context, old, new FileData, o CompareOptions) ui.Element {
 			if state.fold {
 				label = "Show unchanged"
 			}
-			if ui.Button(c, label).Clicked() {
+			if ui.Button(c, tr(o.Labels, label)).Clicked() {
 				state.fold = !state.fold
 				c.Invalidate()
 			}
-			if ui.Button(c, "Copy updated").Clicked() {
+			if ui.Button(c, tr(o.Labels, "Copy updated")).Clicked() {
 				c.Services().WriteClipboard(new.Content)
 			}
 		})

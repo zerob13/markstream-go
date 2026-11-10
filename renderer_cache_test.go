@@ -49,3 +49,38 @@ func TestIndependentRendererKeepsRichMarkdownInsideDefinitions(t *testing.T) {
 		t.Fatal(text)
 	}
 }
+
+func TestIndependentNodeIdentitySurvivesEditsAndPrepend(t *testing.T) {
+	parser := NewParser(0)
+	nodes := parser.Set("# First\n\nSecond paragraph.\n\n# Last", true)
+	lastID := nodes[len(nodes)-1].ID
+	edited := parser.Set("# First edited\n\nSecond paragraph.\n\n# Last", true)
+	if edited[len(edited)-1].ID != lastID {
+		t.Fatal("offset-only edit remounted the last block")
+	}
+	prepended := parser.Set("Intro.\n\n# First edited\n\nSecond paragraph.\n\n# Last", true)
+	if prepended[len(prepended)-1].ID != lastID {
+		t.Fatal("prepend lost the last block's stable identity")
+	}
+}
+
+func TestIndependentParagraphPrependDoesNotStealExistingIdentity(t *testing.T) {
+	parser := NewParser(0)
+	before := parser.Set("First.\n\nSecond.\n\nThird.", true)
+	ids := []string{before[0].ID, before[1].ID, before[2].ID}
+	after := parser.Set("Inserted.\n\nFirst.\n\nSecond.\n\nThird.", true)
+	for i, id := range ids {
+		if after[i+1].ID != id {
+			t.Fatalf("paragraph %d lost identity: %s -> %s", i, id, after[i+1].ID)
+		}
+	}
+}
+
+func TestRepeatedParagraphEditsKeepUniqueIDs(t *testing.T) {
+	p := NewParser(0)
+	p.Set("A.\n\nB.", true)
+	nodes := p.Set("B.\n\nB.", true)
+	if nodes[0].ID == nodes[1].ID {
+		t.Fatal("duplicate nodes share native control identity")
+	}
+}

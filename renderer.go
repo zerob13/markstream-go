@@ -16,8 +16,7 @@ func (v *viewState) renderNode(c *ui.Context, n *Node) ui.Element {
 	c.Key(struct {
 		Generation uint64
 		ID         string
-		Index      int
-	}{v.contentGeneration, n.ID, n.Index})
+	}{v.contentGeneration, n.ID})
 	box := ui.Column(c).AlignSelf(ui.Stretch)
 	if n.Type != "item" && n.Type != "table_row" {
 		box.Margin(0, 0, v.fallback.FontSize*v.fallback.BlockSpacing, 0)
@@ -48,7 +47,11 @@ func (v *viewState) renderNode(c *ui.Context, n *Node) ui.Element {
 		case "heading":
 			level := min(6, max(1, n.Level))
 			h := v.fallback.Headings[level-1]
+			box.Margin(v.fallback.FontSize*h.Top, 0, v.fallback.FontSize*h.Bottom, 0)
 			v.paragraph(c, n, inlineStyle{size: v.fallback.FontSize * h.Size, weight: h.Weight, color: h.Color}).Role(ui.RoleHeading).Level(level)
+			if h.Rule {
+				ui.Box(c).Height(1).AlignSelf(ui.Stretch).Background(v.fallback.Rule)
+			}
 		case "code_block":
 			v.code(c, n)
 		case "html_block":
@@ -147,6 +150,10 @@ func (v *viewState) renderNode(c *ui.Context, n *Node) ui.Element {
 						for _, child := range footnote.Children {
 							v.renderNode(c, child)
 						}
+						if ui.Button(c, "↩").Label("Back to footnote reference " + footnote.Label).Clicked() {
+							v.anchor = "footnote-ref:" + footnote.Label
+							v.scrollAnchor(c)
+						}
 					})
 				})
 			}
@@ -177,7 +184,7 @@ func (v *viewState) table(c *ui.Context, n *Node) {
 	for _, row := range n.Children {
 		for column, cell := range row.Children {
 			w, _ := c.MeasureText(0, ui.Span{Text: plainNodes(cell.Children), Size: v.fallback.FontSize})
-			widths[column] = max(widths[column], min(w, v.fallback.FontSize*v.fallback.TableMaxColumn)+v.fallback.FontSize*1.2+1)
+			widths[column] = max(widths[column], min(w, v.fallback.FontSize*v.fallback.TableMaxColumn)+v.fallback.FontSize*v.fallback.TableCellPadding[0]*2+1)
 		}
 	}
 	v.tableWidths[n.ID] = widths
@@ -198,7 +205,7 @@ func (v *viewState) table(c *ui.Context, n *Node) {
 							role = ui.RoleColumnHeader
 							weight = 600
 						}
-						cellBox := ui.Column(c).Width(widths[column]).Padding(v.fallback.FontSize*.4, v.fallback.FontSize*.6).BorderWidth(0, 1, 1, 0).BorderColor(v.fallback.TableBorder).Role(role).Label(plainNodes(cell.Children))
+						cellBox := ui.Column(c).Width(widths[column]).Padding(v.fallback.FontSize*v.fallback.TableCellPadding[1], v.fallback.FontSize*v.fallback.TableCellPadding[0]).BorderWidth(0, 1, 1, 0).BorderColor(v.fallback.TableBorder).Role(role).Label(plainNodes(cell.Children))
 						cellBox.Children(func() {
 							text := v.paragraph(c, cell, inlineStyle{weight: weight})
 							if column < len(n.Align) {
@@ -241,6 +248,9 @@ func (v *viewState) code(c *ui.Context, n *Node) {
 	if p.CodeOptions != nil {
 		options = *p.CodeOptions
 	}
+	if options.Labels == nil {
+		options.Labels = v.props.Labels
+	}
 	RenderCode(c, b, options)
 }
 
@@ -268,11 +278,28 @@ func (b *CodeBlock) Body(c *ui.Context) ui.Element {
 }
 func (b *CodeBlock) NoteElement(el ui.Element, line int) {
 	if b.owner != nil && b.node != nil {
-		b.owner.note(el, b.node)
+		source := b.Code()
+		start := 0
+		for range line {
+			i := strings.IndexByte(source[start:], '\n')
+			if i < 0 {
+				break
+			}
+			start += i + 1
+		}
+		end := len(source)
+		if i := strings.IndexByte(source[start:], '\n'); i >= 0 {
+			end = start + i
+		}
+		b.owner.sources[el.ID()] = sourceRegion{source: source, start: start, end: end, node: b.node}
 	}
 }
 func (b *CodeBlock) CopyButton(c *ui.Context) ui.Element {
-	button := ui.Button(c, "Copy").Disabled(b.Open)
+	label := "Copy"
+	if b.owner != nil {
+		label = b.owner.label(label)
+	}
+	button := ui.Button(c, label).Disabled(b.Open)
 	copied := ui.Local(button, "copied", func() time.Time { return time.Time{} })
 	if button.Clicked() {
 		c.Services().WriteClipboard(b.Code())
@@ -280,7 +307,11 @@ func (b *CodeBlock) CopyButton(c *ui.Context) ui.Element {
 		c.After(2 * time.Second)
 	}
 	if !copied.IsZero() && c.Now().Sub(*copied) < 2*time.Second {
-		ui.Text(c, "Copied").FontSize(11)
+		label := "Copied"
+		if b.owner != nil {
+			label = b.owner.label(label)
+		}
+		ui.Text(c, label).FontSize(11)
 	}
 	return button
 }

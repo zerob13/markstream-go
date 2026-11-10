@@ -1,7 +1,9 @@
 package markstream
 
 import (
+	"encoding/json"
 	"fmt"
+	"golang.org/x/net/html"
 	"strings"
 
 	"github.com/egoist/mygo/ui/markdown/parser"
@@ -11,6 +13,7 @@ import (
 // parser is only a tokenizer dependency; no MyGo Markdown widget is used.
 type Node struct {
 	ID, Type, Raw, Content, Language, Info, URL, Title, Label, LocalSource string
+	Attributes                                                             map[string]string
 	Start, End, Index, Level, Number                                       int
 	Loading, Ordered, Header                                               bool
 	Task                                                                   int
@@ -18,17 +21,45 @@ type Node struct {
 	Children                                                               []*Node
 }
 type nodeCache struct {
+	kind parser.Kind
+
 	raw      string
 	revision uint32
 	node     *Node
 }
 type nodeBuilder struct {
+	incoming map[string]int
+
+	serial   uint64
+	used     map[string]bool
+	previous map[string][]*Node
+
 	cache map[int]nodeCache
 	doc   *Document
 }
 
 func (b *nodeBuilder) build(d *Document) []*Node {
 	b.doc = d
+	b.used = map[string]bool{}
+	b.incoming = map[string]int{}
+	src := d.Source()
+	for i := 1; i < d.Len(); i++ {
+		block := d.Block(i)
+		start, end := max(0, block.Start), min(len(src), block.End)
+		if end >= start {
+			key := fmt.Sprintf("%d:%s", block.Kind, contentHash(src[start:end]))
+			b.incoming[key]++
+		}
+	}
+	b.previous = map[string][]*Node{}
+	for i, entry := range b.cache {
+		if i >= d.Len() {
+			delete(b.cache, i)
+			continue
+		}
+		key := fmt.Sprintf("%d:%s", entry.kind, contentHash(entry.raw))
+		b.previous[key] = append(b.previous[key], entry.node)
+	}
 	if b.cache == nil {
 		b.cache = map[int]nodeCache{}
 	}
@@ -62,7 +93,7 @@ func (b *nodeBuilder) block(i int) *Node {
 			children = append(children, b.block(child))
 		}
 	}
-	if previous, ok := b.cache[i]; ok && previous.raw == raw && previous.revision == revision && previous.node.Start == start && previous.node.End == end && previous.node.Loading == (block.Open && d.Streaming()) {
+	if previous, ok := b.cache[i]; ok && !b.used[previous.node.ID] && previous.raw == raw && previous.revision == revision && previous.node.Start == start && previous.node.End == end && previous.node.Loading == (block.Open && d.Streaming()) {
 		same := leaf || len(children) == len(previous.node.Children)
 		if !leaf && same {
 			for index, child := range children {
@@ -73,6 +104,7 @@ func (b *nodeBuilder) block(i int) *Node {
 			}
 		}
 		if same {
+			b.used[previous.node.ID] = true
 			return previous.node
 		}
 	}
@@ -80,7 +112,28 @@ func (b *nodeBuilder) block(i int) *Node {
 		children = b.inlines(in, 0, len(in))
 	}
 	raw = strings.Clone(raw)
-	n := &Node{ID: fmt.Sprintf("%d:%d", block.Start, block.Kind), Type: strings.ReplaceAll(strings.ToLower(block.Kind.String()), " ", "_"), Raw: raw, Start: start, End: end, Index: i, Level: block.Level, Number: block.Number, Ordered: block.Ordered, Loading: block.Open && d.Streaming(), Header: block.Header, Task: int(block.Task), Info: block.Info(), Language: block.Language(), Label: block.Label(), Children: children}
+	id := ""
+	key := fmt.Sprintf("%d:%s", block.Kind, contentHash(raw))
+	for _, old := range b.previous[key] {
+		if !b.used[old.ID] && old.Raw == raw {
+			id = old.ID
+			break
+		}
+	}
+	if id == "" {
+		if old, ok := b.cache[i]; ok && !b.used[old.node.ID] && old.kind == block.Kind {
+			oldKey := fmt.Sprintf("%d:%s", old.kind, contentHash(old.raw))
+			if b.incoming[oldKey] == 0 {
+				id = old.node.ID
+			}
+		}
+	}
+	if id == "" {
+		b.serial++
+		id = fmt.Sprintf("node:%d", b.serial)
+	}
+	b.used[id] = true
+	n := &Node{ID: id, Type: strings.ReplaceAll(strings.ToLower(block.Kind.String()), " ", "_"), Raw: raw, Start: start, End: end, Index: i, Level: block.Level, Number: block.Number, Ordered: block.Ordered, Loading: block.Open && d.Streaming(), Header: block.Header, Task: int(block.Task), Info: block.Info(), Language: block.Language(), Label: block.Label(), Children: children}
 	if block.Alert != parser.NoAlert {
 		n.Type = "admonition"
 		n.Label = block.Alert.String()
@@ -95,13 +148,30 @@ func (b *nodeBuilder) block(i int) *Node {
 			n.Content = pendingFenceTail(n.Content, n.Raw, n.Loading)
 		}
 	case parser.Paragraph:
+		if len(n.Children) == 1 && n.Children[0].Type == "html_inline" && !inlineHTMLTag(n.Children[0].Label) {
+			child := n.Children[0]
+			n.Type = "html_block"
+			n.Content = n.Raw
+			n.Attributes = child.Attributes
+		}
 		if defs := definitionNodes(d.Lines(i), n); defs != nil {
 			n.Type = "definition_list"
 			n.Children = defs
 		}
 	}
-	b.cache[i] = nodeCache{raw, revision, n}
+	if n.Type == "html_block" {
+		n.Attributes = htmlAttributes(n.Content)
+	}
+	b.cache[i] = nodeCache{kind: block.Kind, raw: raw, revision: revision, node: n}
 	return n
+}
+
+func inlineHTMLTag(tag string) bool {
+	switch tag {
+	case "span", "b", "strong", "i", "em", "s", "del", "strike", "u", "ins", "code", "kbd", "samp", "mark", "sub", "sup", "small", "a":
+		return true
+	}
+	return false
 }
 func (b *nodeBuilder) inlines(in []parser.Inline, from, to int) []*Node {
 	var nodes []*Node
@@ -122,7 +192,7 @@ func (b *nodeBuilder) inlines(in []parser.Inline, from, to int) []*Node {
 		}
 		nodes = append(nodes, n)
 	}
-	return nodes
+	return groupInlineHTML(nodes)
 }
 func plainNodes(nodes []*Node) string {
 	var out strings.Builder
@@ -178,7 +248,21 @@ func projectContainers(input []*Node) []*Node {
 		if title == "" {
 			title = kind
 		}
-		container := &Node{ID: n.ID + ":container", Type: "container", Label: kind, Title: title, Index: n.Index, Start: n.Start, End: n.End, Raw: n.Raw, Loading: n.Loading}
+		attrs := map[string]string{}
+		if at := strings.IndexByte(header, '{'); at >= 0 {
+			var values map[string]any
+			if json.Unmarshal([]byte(header[at:]), &values) == nil {
+				for key, value := range values {
+					attrs[strings.TrimPrefix(key, "data-")] = fmt.Sprint(value)
+				}
+			} else {
+				attrs["attrs"] = header[at:]
+			}
+		}
+		if args := strings.TrimSpace(strings.TrimPrefix(header, kind)); args != "" {
+			attrs["args"] = args
+		}
+		container := &Node{Attributes: attrs, ID: n.ID + ":container", Type: "container", Label: kind, Title: title, Index: n.Index, Start: n.Start, End: n.End, Raw: n.Raw, Loading: n.Loading}
 		if len(lines) > 1 {
 			body := lines[1:]
 			if strings.TrimSpace(body[len(body)-1]) == ":::" {
@@ -224,6 +308,12 @@ func cloneNodes(nodes []*Node) []*Node {
 	out := make([]*Node, len(nodes))
 	for i, n := range nodes {
 		copy := *n
+		if n.Attributes != nil {
+			copy.Attributes = map[string]string{}
+			for k, v := range n.Attributes {
+				copy.Attributes[k] = v
+			}
+		}
 		copy.Children = cloneNodes(n.Children)
 		out[i] = &copy
 	}
@@ -238,6 +328,67 @@ func keyedNodes(nodes []*Node, path string) []*Node {
 		}
 		copy.Children = keyedNodes(n.Children, copy.ID)
 		out[i] = &copy
+	}
+	return out
+}
+
+func htmlAttributes(source string) map[string]string {
+	z := html.NewTokenizer(strings.NewReader(source))
+	kind := z.Next()
+	if kind != html.StartTagToken && kind != html.SelfClosingTagToken {
+		return nil
+	}
+	attrs := map[string]string{}
+	for _, attr := range z.Token().Attr {
+		attrs[attr.Key] = attr.Val
+	}
+	return attrs
+}
+func groupInlineHTML(nodes []*Node) []*Node {
+	var out []*Node
+	for i := 0; i < len(nodes); i++ {
+		n := nodes[i]
+		if n.Type != "html" || strings.HasPrefix(n.Content, "</") || strings.HasSuffix(n.Content, "/>") {
+			out = append(out, n)
+			continue
+		}
+		tag := htmlTag(n.Content)
+		end := i + 1
+		depth := 1
+		for ; end < len(nodes); end++ {
+			item := nodes[end]
+			if item.Type == "html" && htmlTag(item.Content) == tag {
+				if strings.HasPrefix(item.Content, "</") {
+					depth--
+				} else {
+					depth++
+				}
+				if depth == 0 {
+					break
+				}
+			}
+		}
+		if end == len(nodes) {
+			out = append(out, n)
+			continue
+		}
+		group := *n
+		group.Type = "html_inline"
+		group.Label = tag
+		group.Attributes = htmlAttributes(n.Content)
+		group.Children = groupInlineHTML(nodes[i+1 : end])
+		group.End = nodes[end].End
+		var raw strings.Builder
+		for _, part := range nodes[i : end+1] {
+			if part.Type == "html" {
+				raw.WriteString(part.Content)
+			} else {
+				raw.WriteString(plainNodes([]*Node{part}))
+			}
+		}
+		group.Content = raw.String()
+		out = append(out, &group)
+		i = end
 	}
 	return out
 }

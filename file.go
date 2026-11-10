@@ -19,6 +19,10 @@ type LineEvent struct {
 	Kind             DiffKind
 }
 type FileOptions struct {
+	Labels    Labels
+	TabSize   int
+	Font      string
+	Theme     *editor.Theme
 	Streaming bool
 	Language  string
 	Compare   *CompareOptions
@@ -131,7 +135,7 @@ func File(c *ui.Context, data FileData, o FileOptions) ui.Element {
 		ui.Row(c).Children(func() {
 			ui.Text(c, data.Name).Bold()
 			ui.Spacer(c)
-			if ui.Button(c, "Copy file").Clicked() {
+			if ui.Button(c, tr(o.Labels, "Copy file")).Clicked() {
 				c.Services().WriteClipboard(data.Content)
 			}
 		})
@@ -146,7 +150,14 @@ func fileBody(c *ui.Context, data FileData, o FileOptions, note func(ui.Element,
 	size, lineHeight, maxHeight := fileMetrics(o)
 	height := min(maxHeight, float32(len(s.lines))*lineHeight+8)
 	gutter := max(4, len(strconv.Itoa(len(s.lines))))
-	palette := editor.DefaultTheme(c.Theme())
+	palette := o.Theme
+	if palette == nil {
+		palette = editor.DefaultTheme(c.Theme())
+	}
+	font := o.Font
+	if font == "" {
+		font = "monospace"
+	}
 	return box.Children(func() {
 		ui.List(c, &s.list, len(s.lines), func(i int) {
 			event := LineEvent{Number: i + 1, New: i + 1, Text: s.lines[i]}
@@ -158,12 +169,19 @@ func fileBody(c *ui.Context, data FileData, o FileOptions, note func(ui.Element,
 				if !o.HideLineNumbers {
 					ui.Text(c, fmt.Sprintf("%*d", gutter, i+1)).Font("monospace").FontSize(size).Width(float32(gutter)*size*.65+18).Padding(0, 8).TextColor(c.Theme().TextMuted).Unselectable()
 				}
-				el := ui.RichText(c, fileSpans(s.lines[i], s.tokens[i], palette)...).Font("monospace").FontSize(size).LineHeight(lineHeight / size)
-				if !o.Wrap {
-					el.NoWrap()
+				buildText := func() {
+					el := ui.RichText(c, expandTabs(fileSpans(s.lines[i], s.tokens[i], palette), o.TabSize)...).Font(font).FontSize(size).LineHeight(lineHeight / size)
+					if !o.Wrap {
+						el.NoWrap()
+					}
+					if note != nil {
+						note(el, i)
+					}
 				}
-				if note != nil {
-					note(el, i)
+				if o.Wrap {
+					buildText()
+				} else {
+					ui.ScrollHorizontal(c).FillWidth().Children(buildText)
 				}
 			})
 			if row.Clicked() {
@@ -185,9 +203,9 @@ func FileDiff(c *ui.Context, source string, o FileOptions) ui.Element {
 	root := ui.Column(c).AlignSelf(ui.Stretch).Gap(5)
 	root.Children(func() {
 		ui.Row(c).Children(func() {
-			ui.Text(c, "Changes").Bold()
+			ui.Text(c, tr(o.Labels, "Changes")).Bold()
 			ui.Spacer(c)
-			if ui.Button(c, "Copy diff").Clicked() {
+			if ui.Button(c, tr(o.Labels, "Copy diff")).Clicked() {
 				c.Services().WriteClipboard(source)
 			}
 		})
@@ -211,7 +229,7 @@ func patchBody(c *ui.Context, source string, o FileOptions) ui.Element {
 			if s.mode == Split {
 				label = "Unified"
 			}
-			if ui.Button(c, label).Clicked() {
+			if ui.Button(c, tr(o.Labels, label)).Clicked() {
 				if s.mode == Split {
 					s.mode = Unified
 				} else {
@@ -223,7 +241,7 @@ func patchBody(c *ui.Context, source string, o FileOptions) ui.Element {
 			if s.fold {
 				label = "Show unchanged"
 			}
-			if ui.Button(c, label).Clicked() {
+			if ui.Button(c, tr(o.Labels, label)).Clicked() {
 				s.fold = !s.fold
 				c.Invalidate()
 			}
@@ -313,4 +331,26 @@ func diffCell(c *ui.Context, line *DiffLine, old bool, o FileOptions) {
 	if o.Annotation != nil {
 		o.Annotation(c, event)
 	}
+}
+
+func expandTabs(spans []ui.Span, tabSize int) []ui.Span {
+	if tabSize <= 0 {
+		tabSize = 4
+	}
+	column := 0
+	for i := range spans {
+		var out strings.Builder
+		for _, r := range spans[i].Text {
+			if r == '\t' {
+				n := tabSize - column%tabSize
+				out.WriteString(strings.Repeat(" ", n))
+				column += n
+			} else {
+				out.WriteRune(r)
+				column++
+			}
+		}
+		spans[i].Text = out.String()
+	}
+	return spans
 }

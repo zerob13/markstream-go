@@ -25,6 +25,9 @@ func testEngine(t *testing.T) *Engine {
 		}
 	}
 	if browser == "" {
+		if os.Getenv("MARKSTREAM_REQUIRE_CHROME") == "1" {
+			t.Fatal("Chromium is required by this test job; set MARKSTREAM_CHROME_PATH")
+		}
 		t.Skip("Chromium not installed")
 	}
 	e := New(Options{BrowserPath: browser, NoSandbox: os.Getenv("MARKSTREAM_CHROME_NO_SANDBOX") == "1"})

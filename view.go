@@ -19,6 +19,10 @@ const (
 )
 
 type Props struct {
+	Pending int
+	Locale  string
+	Labels  Labels
+
 	MaxLiveNodes          int
 	DisableVirtualization bool
 
@@ -114,6 +118,8 @@ type viewState struct {
 type sourceRegion struct {
 	source     string
 	start, end int
+	node       *Node
+	fragments  []selectionFragment
 }
 type ownerState struct{ view *viewState }
 
@@ -186,14 +192,13 @@ func buildView(c *ui.Context, source string, p Props, session *Session) ui.Eleme
 		source = serialized.String()
 	}
 	if source != v.source {
-		if !strings.HasPrefix(source, v.source) {
-			v.reset()
-		}
+
 		v.source = source
 		v.settledFired = false
 		v.finalFired = false
 	}
 	v.props = p
+	v.props.Labels = labelsFor(p.Locale, p.Labels)
 	v.fallback = resolveTheme(c, p)
 	v.services = c.Services()
 	v.dark = c.Theme().Dark
@@ -245,7 +250,6 @@ func buildView(c *ui.Context, source string, p Props, session *Session) ui.Eleme
 				v.doc.Append(shown[len(old):])
 			} else {
 				v.doc.Set(shown)
-				v.builder = nodeBuilder{}
 			}
 		}
 	}
@@ -317,6 +321,17 @@ func buildView(c *ui.Context, source string, p Props, session *Session) ui.Eleme
 	}
 	if !p.ShareSelection {
 		root.Selectable().CopyData(func(parts []ui.SelectedText) transfer.Data { return v.copySelection(parts) })
+		root.ContextMenu(func(m *ui.Menu) {
+			m.EditItems()
+			m.Separator()
+			parts := root.SelectedTexts()
+			if m.Item(v.label("Copy Markdown")).Disabled(len(parts) == 0).Chosen() {
+				c.Services().WriteClipboard(v.selectedMarkdown(parts))
+			}
+		})
+		if root.Shortcut(ui.Cmd|ui.Shift, ui.KeyC) {
+			c.Services().WriteClipboard(v.selectedMarkdown(root.SelectedTexts()))
+		}
 	}
 	v.sources = map[uint64]sourceRegion{}
 	root.Children(func() {
@@ -340,14 +355,25 @@ func Revealed(el ui.Element) bool {
 		return false
 	}
 	v := owner.view
-	return !v.revealing && !v.fading && v.jobs.Load() == 0
+	return !v.revealing && !v.fading && v.jobs.Load()+int64(max(v.props.Pending, 0)) == 0
 }
 func (v *viewState) progress(source string, receiving bool, el ui.Element) {
-	status := RenderStatus{Receiving: receiving, Revealing: v.revealing || v.fading, Pending: int(v.jobs.Load())}
+	status := RenderStatus{Receiving: receiving, Revealing: v.revealing || v.fading, Pending: int(v.jobs.Load()) + max(v.props.Pending, 0)}
 	status.Settled = !status.Revealing && status.Pending == 0
 	status.Final = status.Settled && !receiving
 	if v.props.Virtual != nil {
 		status.Metrics = v.props.Virtual.Metrics()
+		if v.props.Virtual.restore != nil {
+			status.Pending++
+			status.Settled = false
+			status.Final = false
+		}
+	}
+	if !status.Settled {
+		v.settledFired = false
+	}
+	if !status.Final {
+		v.finalFired = false
 	}
 	if v.props.OnUpdate != nil {
 		v.props.OnUpdate(status)
@@ -411,24 +437,5 @@ func (v *viewState) note(el ui.Element, n *Node) {
 	if n.LocalSource != "" {
 		source = n.LocalSource
 	}
-	v.sources[el.ID()] = sourceRegion{source, n.Start, n.End}
-}
-func (v *viewState) copySelection(parts []ui.SelectedText) transfer.Data {
-	var plain, html strings.Builder
-	for i, p := range parts {
-		runes := []rune(p.Text)
-		a, b := max(0, p.Start), min(len(runes), p.End)
-		if b < a {
-			continue
-		}
-		if i > 0 {
-			plain.WriteByte('\n')
-		}
-		plain.WriteString(string(runes[a:b]))
-	}
-	text := plain.String()
-	html.WriteString("<pre>")
-	html.WriteString(strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(text))
-	html.WriteString("</pre>")
-	return selectionData(text, html.String(), v.source)
+	v.sources[el.ID()] = sourceRegion{source: source, start: n.Start, end: n.End, node: n}
 }
