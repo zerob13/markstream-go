@@ -1,0 +1,30 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go mod download
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+      - run: go build -o artifacts/demo ./examples/demo
+      - run: go run ./examples/demo -smoke
+      - if: runner.os == 'Linux'
+        run: go test -race -count=1 ./...
+      - if: runner.os == 'Linux'
+        shell: bash
+        run: test -z "$(gofmt -l .)"
