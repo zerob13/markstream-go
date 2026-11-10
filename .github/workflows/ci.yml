@@ -21,8 +21,18 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: go mod download
+      - if: runner.os == 'Linux'
+        uses: browser-actions/setup-chrome@v2
+        id: chrome
+      - if: runner.os == 'Linux'
+        name: Use the provisioned browser
+        run: |
+          test -x '${{ steps.chrome.outputs.chrome-path }}'
+          echo 'MARKSTREAM_CHROME_PATH=${{ steps.chrome.outputs.chrome-path }}' >> "$GITHUB_ENV"
       - run: go vet ./...
-      - run: go test -count=1 ./...
+      # Rich integrations in separate Go packages start browser workers. Avoid
+      # competing cold browser startups on the small hosted Linux runner.
+      - run: go test -p 1 -count=1 ./...
       - run: go build -o artifacts/demo ./examples/demo
       - run: go run ./examples/demo -smoke
       - if: runner.os == 'Linux'
@@ -44,7 +54,7 @@ jobs:
         run: |
           test -x '${{ steps.chrome.outputs.chrome-path }}'
           echo 'MARKSTREAM_CHROME_PATH=${{ steps.chrome.outputs.chrome-path }}' >> "$GITHUB_ENV"
-      - run: go test -race -count=1 ./...
+      - run: go test -p 1 -race -count=1 ./...
       - run: go run ./examples/demo -page 'Rich content' -snapshot artifacts/gallery.png
       - uses: actions/upload-artifact@v4
         with:
