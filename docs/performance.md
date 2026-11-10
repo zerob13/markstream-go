@@ -2,43 +2,46 @@
 
 ## Work avoided
 
-- `Session` accumulates text in a growing builder and returns immutable string snapshots without copying the complete response on each frame.
-- Writes are serialized, and a burst before a snapshot produces one window invalidation. Views read the latest accumulated source once they build.
-- MyGo's parser appends/reparses from its open outer block and maintains completed-block inline caches. A finalization pass restores strict syntax.
-- MyGo highlights changed code lines and retains 32-line text chunks. Idle frames reuse parse, token and text-layout state.
-- `Messages` delegates to MyGo's virtual list: only visible messages plus overscan are built. Native variable-height measurement and anchoring handle growing replies.
+- Session snapshots reuse immutable source; coalesced notifications wake a window once for a burst of writes.
+- Low-level parsing appends from the open outer block and retains completed inline caches. Markstream projects its own cached nodes, invalidating late references and preserving stable IDs through edits/prepends.
+- Native File caches unchanged tokenized lines. Diff uses virtual native editor/list primitives.
+- A virtual document builds visible blocks plus overscan, while retaining global references/footnotes. Position and measured heights can be serialized with source/width/layout validation. Message histories virtualize each reply separately.
+- Rich graphics run off the UI thread in one shared browser worker. Requests coalesce while busy, successful outputs are bounded/cached, and invalid prefixes retain the previous valid preview.
 
-There is no claim that arbitrarily long open paragraphs take constant work: the open tail can need reparsing. Neither does message virtualization make one huge message block-virtualized. Hooks and image loaders can dominate frame cost; keep synchronous UI callbacks cheap.
+The complete AST is retained. An arbitrarily long open paragraph can need reparsing; node projection is not constant work per token. Height totals include estimates for unmeasured blocks. Custom synchronous UI callbacks, fonts and image/graphic layout can dominate cost. A virtual viewport does not pre-render offscreen graphics.
 
 ## Reproduce
 
 ```sh
-go test -run '^$' -bench . -benchmem -benchtime=3x -count=1
+go test -run '^$' -bench . -benchmem -benchtime=20x -count=1
 ```
 
-The parser fixture is the mixed Markdown corpus in `document_test.go`, repeated 20 times (6,520 bytes). Chunks are 64 bytes. Both parser benchmarks process a whole reply: one reuses an incremental document, the other reparses every received prefix. These measure block parsing/allocation, not a full browser or native app workload. Inline layout is exercised separately by the native frame benchmark.
-
-One development-machine sample, Go 1.27.3, Linux amd64, Intel Xeon Platinum 8573C, 4 available Go processors:
+Sample measured with Go 1.27.3, Linux amd64, Intel Xeon Platinum 8573C, four available Go processors:
 
 | Benchmark | Time / operation | Bytes allocated | Allocations |
 | --- | ---: | ---: | ---: |
-| Incremental document | 0.583 ms | 362,696 | 270 |
-| Reparse every prefix | 47.823 ms | 15,955,504 | 12,034 |
-| Native steady frame | 0.883 ms | 14,928 | 186 |
+| Incremental low-level document | 0.458 ms | 362,703 | 270 |
+| Reparse every received prefix | 13.978 ms | 15,953,397 | 12,028 |
+| Native steady frame | 1.113 ms | 115,154 | 899 |
+| 5,000-node virtual document frame | 0.779 ms | 32,520 | 308 |
 
-The native fixture repeats the same corpus five times in an 800×700 MyGo scroll view. The software test renderer builds/layouts frames; these numbers are **not GPU frame times**. This is a three-iteration sample, not a statistically robust performance guarantee. CPU load, fonts, viewport, source and syntax change results. Re-run on the target hardware before setting budgets.
+The parser fixture repeats the mixed corpus 20 times (6,520 bytes), delivered in 64-byte chunks; each operation processes a whole reply. The incremental comparison measures block syntax parsing, not the entire Markstream renderer. The native steady fixture repeats the corpus five times in an 800×700 scroll view. The virtual fixture is 2,500 headings plus paragraphs in an 800×600 viewport. Its initial parse is outside the steady-frame timer. These native frame measurements include software-test build/layout, **not GPU frame times** or graphics-engine startup. This is a 20-iteration development sample, not a hardware-independent guarantee.
 
-## Readiness checks
+## Verified behavior
 
-The initial implementation was validated locally with:
+The independent renderer and demo have been exercised with:
 
-- `go test ./...` including native component interactions and demo playback.
-- `go test -race -count=1 ./...`, including concurrent session writers and native demo tests.
-- `go vet ./...`.
-- Linux amd64 build; `CGO_ENABLED=0` cross-builds for macOS arm64 and Windows amd64.
-- `go run ./examples/demo -smoke` plus actual native software-rendered light/dark PNGs.
-- A parser differential test at **every byte split** of the mixed-syntax corpus, with forced inline materialization before the remaining input arrives and final strict comparison.
+- `go test -count=1 ./...`, including actual Chromium rich-engine integrations.
+- `go test -race -count=1 ./...`, covering session concurrency, native interactions, worker cancellation and all demo pages.
+- `go vet ./...`, gofmt and diff whitespace checks.
+- Linux amd64 build and cgo-free macOS arm64/Windows amd64 cross-builds.
+- Native software-rendered light/dark playground, rich gallery, FileDiff and large-document screenshots.
+- Mixed CommonMark/GFM comparison at every byte split, UTF-8 split delivery, strict EOF, stale producer/reset rejection and notification coalescing.
+- 4,000+/5,000-node virtual documents, bounded visible builds, shared references/footnotes, middle save/restore, incompatible-width rejection, prepend identity and anchor preservation.
+- Partial text/HTML/Markdown clipboard formatting, native code copying/folding, custom inline tags/attributes, Chinese labels, visible fade and actual inline-object pixels.
+- Actual KaTeX display/inline math and macros, D2/Infographic SVG and nonblank PNG output, HTML sanitization, cancellation, immutable result caches and native source/fullscreen/export controls.
+- Mermaid flowchart, sequence, class, state, ER, Gantt, pie, Git, mindmap, timeline, XY, sankey, block and journey fixtures.
 
-The tests also exercise incomplete syntax, late reference definitions, UTF-8 split codepoints, source replacement, reset while reading, cancellation/errors, byte limits, callback coalescing, code copy/folding, unsafe links, subscription cleanup and a 1,000-message virtual list.
+The rich test suite skips if Chromium is absent, unless `MARKSTREAM_REQUIRE_CHROME=1` makes that a failure. CI's dedicated rich job installs Chrome and sets this requirement. Native core tests never require a display.
 
-Desktop startup was attempted in the cloud machine and reported no `DISPLAY`/`WAYLAND_DISPLAY`. The native software renderer, controls and layout run without a display; opening an OS window was therefore not validated in that machine. Cross-compilation does not establish runtime validation on macOS or Windows. The CI configuration runs tests on those operating systems when GitHub Actions executes it; writing the workflow is not an assertion that hosted CI has run.
+This cloud host has no X11/Wayland display. Actual OS-window startup was attempted and could not open a display; component controls and layout were verified through MyGo's real software renderer. Cross-compilation is not runtime testing on macOS/Windows. Hosted CI results must be checked on GitHub; the presence of a workflow does not assert that those runners have already passed.

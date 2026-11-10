@@ -1,35 +1,40 @@
 # markstream-go
 
-**Streaming Markdown components for [MyGo](https://github.com/egoist/mygo), written in Go and rendered with native controls.**
+**Streaming Markdown components for [MyGo](https://github.com/egoist/mygo), with an independent Go renderer.**
 
-[中文说明](README.zh-CN.md) · [API guide](docs/api.md) · [Feature comparison](docs/parity.md) · [Performance](docs/performance.md) · [Demo](examples/demo)
+[中文说明](README.zh-CN.md) · [API](docs/api.md) · [markstream-vue comparison](docs/parity.md) · [Performance](docs/performance.md) · [Demo](examples/demo)
 
 ![Native dark playground](docs/images/demo-dark.png)
 
-Build an LLM conversation, a streamed document, or a Markdown viewer without a webview. Inspired by [markstream-vue](https://github.com/Simon-He95/markstream-vue)'s streaming workflow and [Lobe MyGo](https://github.com/lobehub/lobe-mygo)'s native component approach. Parsing, text shaping and native drawing use MyGo; this library adds a concurrent streaming model, lifecycle handling, native components and a runnable playground.
+A component library for LLM conversations, streamed documents and long Markdown files. The streaming behavior and feature set follow [markstream-vue](https://github.com/Simon-He95/markstream-vue); the native component approach is informed by [Lobe MyGo](https://github.com/lobehub/lobe-mygo).
+
+**This library does not import or copy MyGo's Markdown widget.** Markstream owns its node model, renderer, streaming projection, reveal animation, code surfaces, virtual document state and extension registry. It reuses MyGo's low-level CommonMark/GFM parser, native UI primitives and editor/diff primitives.
 
 ## Features
 
-- CommonMark and GFM: headings, emphasis, links, images, nested lists, task lists, tables, quotes, alerts, footnotes, inline code and fenced code.
-- Incremental parsing, incomplete-inline healing, cached finished blocks, and strict Markdown finalization at EOF.
-- Thread-safe `io.Writer` sessions with UTF-8 chunk buffering, byte limits, immutable snapshots, cancellation, errors and generation-safe resets.
-- Coalesced window invalidations, smooth character/word/line reveal and a completion signal that includes queued animation.
-- Native highlighted code blocks, language/filename headers, copy, collapse, height limits and wrapping.
-- Virtualized variable-height **message lists**, stable row identities, follow-to-end and scroll anchoring.
-- Light/dark theming, selectable text, native clipboard formats, anchors, image loaders and custom block/code/math renderers.
-- A Go-only desktop demo with an editable source, streaming controls and a 1,000-message history. The same UI is tested using MyGo's native software renderer.
+- CommonMark/GFM, nested/task lists, tables, alerts, footnotes, definitions, `:::` containers and details.
+- Incomplete-inline repair while receiving, strict EOF finalization, incremental parsing, cached completed nodes and stable identities across edits/prepends.
+- Thread-safe `io.Writer` sessions: UTF-8 chunk buffering, limits, immutable snapshots, coalesced notifications, cancellation and generation-safe reset.
+- Grapheme-aware character reveal, word/sentence/line/paragraph pacing, visible fade, reduced-motion support and completion events that wait for background work.
+- Native highlighted code, filename headers, copy, collapse, wrap, size controls and custom header slots.
+- **File / FileDiff / Compare**: line virtualization, split/unified layouts, word/character highlights, original patch line numbers, context expansion, selections, gutter actions and annotations. Diff fences have a streaming surface and a final native editor surface.
+- **Single-document virtualization** and virtualized message histories, variable-height measurement, stable row keys, scroll anchors, follow-end and serializable position/height snapshots.
+- **Real Mermaid, KaTeX, D2 and AntV Infographic renderers**, progressive valid-prefix previews, source mode, pan/zoom, fullscreen and SVG/PNG export.
+- Bounded image loading, SVG, native image previews, safe links, heading/footnote anchors, extended inline syntax, emoji and sanitized HTML.
+- Per-view node/tag/language overrides, parsed-node input, parse transforms, light/dark themes and localized control labels.
+- A native desktop demo with five pages: streaming playground, rich-content gallery, 5,000-node document, FileDiff and 1,000-message history.
 
-The first version targets the core streaming Markdown workflow. Mermaid/D2/infographic engines and TeX typesetting are **extension points, not bundled renderers**. They fall back to readable source. Single-document block virtualization and Vue's File/FileDiff surfaces are not implemented; see the explicit [comparison](docs/parity.md).
+The application window uses native MyGo controls, **without a WebView**. Core Markdown, code and diff need only Go. The optional `rich` package embeds the actual rendering engines/fonts and uses a shared **headless Chromium worker** for graphics and HTML layout. It requires a locally installed Chromium/Chrome executable; it does not download assets at runtime. Node is needed only to rebuild bundled assets. See [architecture and compatibility](docs/parity.md).
 
 ## Install
 
-Requires **Go 1.27.3+** (required by the pinned MyGo version).
+Requires **Go 1.27.3+**, matching the pinned MyGo dependency.
 
 ```sh
-go get github.com/zerob13/markstream-go
+go get github.com/zerob13/markstream-go@main
 ```
 
-Native applications need neither Node nor Bun. MyGo supports macOS, Windows and Linux without cgo; Linux desktop execution needs MyGo's platform libraries and a display. Headless component tests and snapshots do not need a display server.
+MyGo supports Linux, macOS and Windows without cgo. A desktop window needs the platform libraries and a display; software-rendered native tests and PNG snapshots work without a display server.
 
 ## Quick start
 
@@ -41,18 +46,17 @@ import (
 
     "github.com/egoist/mygo"
     "github.com/egoist/mygo/ui"
-    markstream "github.com/zerob13/markstream-go"
+    ms "github.com/zerob13/markstream-go"
 )
 
 func main() {
-    reply := markstream.NewSession(1 << 20) // 1 MiB; 0 means unlimited
+    reply := ms.NewSession(1 << 20)
     mygo.App.WhenReady(func() {
         mygo.NewWindow(mygo.WindowOptions{
-            Title: "Streaming Markdown",
-            Width: 800, Height: 600,
+            Title: "Streaming Markdown", Width: 800, Height: 600,
             Content: ui.View(func(c *ui.Context) {
                 ui.Scroll(c).Fill().Children(func() {
-                    markstream.Stream(c, reply, markstream.Props{})
+                    ms.Stream(c, reply, ms.Props{})
                 })
             }),
         })
@@ -64,29 +68,55 @@ func main() {
             _ = reply.Finish()
         }()
     })
-    if err := mygo.App.Run(); err != nil {
-        log.Fatal(err)
-    }
+    if err := mygo.App.Run(); err != nil { log.Fatal(err) }
 }
 ```
 
-`Stream` subscribes to the session and safely requests UI frames. Write from a producer goroutine; build controls on the UI thread. A session is one logical reply; use `Reset` to start another generation. Give repeated controls stable keys with `c.Key(messageID)`.
+Write chunks from a producer goroutine; build UI on the UI thread. Use `Finish`, `Cancel` or `Fail` at the end. `Consume(ctx, reader)` accepts raw Markdown; decode SSE/provider JSON before appending text deltas. Keep repeated views keyed with `c.Key(messageID)`.
 
-For a string already in your application state:
+For source already in application state:
 
 ```go
-markstream.View(c, markdown, markstream.Props{
+ms.View(c, sourceSoFar, ms.Props{
     Streaming: receiving,
-    Variant:   markstream.ChatStyle,
-    CodeOptions: &markstream.CodeOptions{
-        Collapsible: true,
-        MaxHeight:   360,
-        Filename:    markstream.FenceFilename,
+    Emoji: true,
+    CodeOptions: &ms.CodeOptions{
+        Collapsible: true, ShowFontSize: true,
+        MaxHeight: 360, Filename: ms.FenceFilename,
+    },
+    OnFinal: func(status ms.RenderStatus) {
+        // EOF, reveal/fade and outstanding mounted graphics/images have settled.
     },
 })
 ```
 
-Keep the view in the same keyed position when `Streaming` becomes false. Call `markstream.Revealed(element)` **inside the same UI frame**, after building the view, to determine whether all received text has finished appearing. Receiving is not equivalent to animation completion.
+Enable the bundled rich renderers with one shared engine, retained for the application's lifetime:
+
+```go
+import "github.com/zerob13/markstream-go/rich"
+
+engine := rich.New(rich.Options{}) // optionally set BrowserPath
+// Close engine when the application exits.
+props := ms.Props{Rich: &ms.RichOptions{
+    Renderer: engine, Progressive: true, MaxHeight: 500,
+}}
+// Inside a UI frame:
+ms.View(c, source, props)
+```
+
+Without an engine, math/diagram/HTML source remains readable. Invalid progressive diagram input keeps the last successful preview and exposes an error/source view. Applications can replace the backend through `RichRenderer`.
+
+For a long document, retain a `VirtualState` and give its view a bounded viewport:
+
+```go
+// Application state:
+virtual := &ms.VirtualState{}
+// Inside a filling native container:
+ms.View(c, source, ms.Props{Virtual: virtual})
+// virtual.Capture() / virtual.Restore(snapshot) preserve a compatible position.
+```
+
+Automatic block virtualization starts above 220 top-level nodes; use `MaxLiveNodes` to change the threshold or `DisableVirtualization` to opt out. Explicit `Virtual` gives the host control of viewport sizing and navigation.
 
 ## Run the demo
 
@@ -96,17 +126,17 @@ cd markstream-go
 go run ./examples/demo
 ```
 
-The playground provides **Stream reply**, **Pause/Resume**, **Finish now**, **Cancel**, an editable Markdown source, instant reveal, a dark theme, code folding and virtualized history.
-
-Without a desktop:
+Install Chromium/Chrome for the rich-content gallery. Set `MARKSTREAM_CHROME_PATH` when it is not discoverable. `MARKSTREAM_CHROME_NO_SANDBOX=1` is available for isolated test containers that cannot run Chromium's sandbox; desktop use keeps the sandbox enabled.
 
 ```sh
 go run ./examples/demo -smoke
 go run ./examples/demo -snapshot artifacts/demo-light.png
 go run ./examples/demo -dark -snapshot artifacts/demo-dark.png
+go run ./examples/demo -page 'Rich content' -snapshot artifacts/gallery.png
+go run ./examples/demo -page 'File diff' -snapshot artifacts/diff.png
 ```
 
-These execute the native MyGo view and software renderer; they are not browser screenshots or HTML substitutes.
+These PNGs come from MyGo's native software renderer. The rich engines generate graphics in the background; the component controls, layout and window are native.
 
 ## Develop
 
@@ -119,8 +149,15 @@ go build ./examples/demo
 go test -run '^$' -bench . -benchmem
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow, [docs/api.md](docs/api.md) for transport integration and custom renderers, and [docs/performance.md](docs/performance.md) for measured results and limits.
+The rich tests use an installed Chromium and skip when none is present. CI has a separate required rich-engine job with Chromium installed and mandatory browser detection. To rebuild the committed offline assets:
 
-## License and acknowledgements
+```sh
+npm ci --prefix tools/renderer
+npm run build --prefix tools/renderer
+```
 
-[MIT](LICENSE). MyGo supplies the incremental Markdown parser and native UI implementation under MIT. markstream-vue and Lobe MyGo informed the architecture; neither JavaScript/Vue runtime nor Lobe's component implementation is included. See [THIRD_PARTY.md](THIRD_PARTY.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the [API guide](docs/api.md).
+
+## License
+
+The Go library is [MIT](LICENSE). Bundled third-party engines retain their own licenses, including D2's MPL-2.0; all notices and the corresponding-source reference are in [THIRD_PARTY.md](THIRD_PARTY.md). No Vue or Lobe component implementation is vendored.
