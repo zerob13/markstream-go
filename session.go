@@ -225,6 +225,10 @@ func (s *Session) Reset() {
 // HTTP request context or close the reader. The reader is owned by the caller.
 func (s *Session) Consume(ctx context.Context, r io.Reader) error {
 	s.mu.Lock()
+	if s.state != Receiving {
+		s.mu.Unlock()
+		return ErrClosed
+	}
 	generation := s.generation
 	s.mu.Unlock()
 	buf := make([]byte, 16*1024)
@@ -242,6 +246,9 @@ func (s *Session) Consume(ctx context.Context, r io.Reader) error {
 			return fail(err)
 		}
 		n, err := r.Read(buf)
+		if canceled := ctx.Err(); canceled != nil {
+			return fail(canceled)
+		}
 		if n > 0 {
 			empty = 0
 			if _, e := s.write(buf[:n], generation, true); e != nil {

@@ -195,3 +195,30 @@ func FuzzSessionUTF8(f *testing.F) {
 		}
 	})
 }
+
+// A closed session must not start reading a potentially blocked transport.
+type unreadableReader struct{}
+
+func (unreadableReader) Read([]byte) (int, error) { panic("closed session read from transport") }
+func TestConsumeClosedSessionDoesNotRead(t *testing.T) {
+	s := new(Session)
+	s.Finish()
+	if e := s.Consume(context.Background(), unreadableReader{}); !errors.Is(e, ErrClosed) {
+		t.Fatal(e)
+	}
+}
+
+type cancelOnRead struct{ cancel context.CancelFunc }
+
+func (r cancelOnRead) Read(p []byte) (int, error) { r.cancel(); copy(p, "late"); return 4, io.EOF }
+func TestConsumeCancellationDuringFinalRead(t *testing.T) {
+	s := new(Session)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if e := s.Consume(ctx, cancelOnRead{cancel}); !errors.Is(e, context.Canceled) {
+		t.Fatal(e)
+	}
+	if got := s.Snapshot(); got.State != Canceled || got.Source != "" {
+		t.Fatalf("%+v", got)
+	}
+}
