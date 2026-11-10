@@ -16,12 +16,21 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	ms "github.com/zerob13/markstream-go"
+	"github.com/zerob13/markstream-go/rich"
 )
 
 //go:embed sample.md
 var sample string
 
 type demo struct {
+	richErrors                                        []error
+	engine                                            *rich.Engine
+	exporter                                          func(ms.Export)
+	renderStatus                                      ms.RenderStatus
+	longSource, oldFile, newFile, diffMode, selection string
+	document                                          ms.VirtualState
+	saved                                             *ms.VirtualSnapshot
+
 	source                         string
 	reply                          *ms.Session
 	active                         []rune
@@ -35,7 +44,7 @@ type demo struct {
 }
 
 func newDemo() *demo {
-	d := &demo{source: sample, reply: ms.NewSession(1 << 20), page: "Playground", list: ui.ListState{FollowEnd: true}}
+	d := &demo{source: sample, reply: ms.NewSession(1 << 20), page: "Playground", diffMode: "Word", list: ui.ListState{FollowEnd: true}}
 	d.reply.Append(sample)
 	d.reply.Finish()
 	for i := range 1000 {
@@ -90,9 +99,12 @@ func (d *demo) view(c *ui.Context) {
 				ui.Text(c, "Streaming Markdown · native MyGo components").FontSize(12).TextColor(theme.TextMuted)
 			})
 			ui.Spacer(c)
-			ui.Select(c, &d.page, []string{"Playground", "1,000 messages"}).Width(165)
+			ui.Select(c, &d.page, []string{"Playground", "Rich content", "Large document", "File diff", "1,000 messages"}).Width(165)
 			ui.Checkbox(c, &d.dark, "Dark")
 		})
+		if d.gallery(c) {
+			return
+		}
 		if d.page == "1,000 messages" {
 			ui.Row(c).Padding(8, 28).Children(func() {
 				ui.Text(c, "1,000 messages · only visible rows are built").TextColor(theme.TextMuted)
@@ -165,7 +177,8 @@ func (d *demo) view(c *ui.Context) {
 				})
 				ui.Scroll(c).Fill().Background(theme.Surface).Border(1, theme.Border).Radius(12).Children(func() {
 					ui.Column(c).Padding(24).AlignSelf(ui.Stretch).Children(func() {
-						p := ms.Props{CodeOptions: &ms.CodeOptions{Collapsible: true, MaxHeight: 340, Filename: ms.FenceFilename}}
+						p := d.richProps()
+						p.CodeOptions = &ms.CodeOptions{Collapsible: true, MaxHeight: 340, Filename: ms.FenceFilename}
 						if d.instant {
 							p.Reveal = &ms.Reveal{Unit: ms.AtOnce, Fade: -1}
 						}
@@ -208,6 +221,9 @@ func smoke(d *demo, path string) error {
 	for range 350 {
 		tt.Advance(25 * time.Millisecond)
 		tt.Frame()
+		if d.reply.Snapshot().Done() && d.revealed {
+			break
+		}
 	}
 	if snap := d.reply.Snapshot(); snap.State != ms.Completed || snap.Source != sample || !d.revealed {
 		return fmt.Errorf("stream did not settle: state=%s revealed=%v", snap.State, d.revealed)
@@ -244,8 +260,11 @@ func main() {
 	smokeFlag := flag.Bool("smoke", false, "run native UI smoke checks without a display")
 	snapshot := flag.String("snapshot", "", "write a native software-rendered PNG without a display")
 	dark := flag.Bool("dark", false, "start with the dark theme")
+	page := flag.String("page", "Playground", "Playground, Rich content, Large document, File diff, or 1,000 messages")
 	flag.Parse()
 	d := newDemo()
+	defer d.Close()
+	d.page = *page
 	d.dark = *dark
 	if *smokeFlag {
 		if err := smoke(d, *snapshot); err != nil {
@@ -255,6 +274,20 @@ func main() {
 	}
 	if *snapshot != "" {
 		tt := ui.NewTester(d.view, 1280, 850)
+		if d.page == "Rich content" {
+			deadline := time.Now().Add(30 * time.Second)
+			for time.Now().Before(deadline) {
+				tt.Advance(16 * time.Millisecond)
+				tt.Frame()
+				if d.renderStatus.Final {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if !d.renderStatus.Final {
+				log.Fatal("rich gallery did not settle")
+			}
+		}
 		if err := saveSnapshot(tt, *snapshot); err != nil {
 			log.Fatal(err)
 		}
