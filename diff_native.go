@@ -8,12 +8,11 @@ import (
 )
 
 type nativePatchView struct {
-	source            string
-	files             []FilePatch
-	diffs             []*editor.DiffState
-	mode              DiffMode
-	fold, initialized bool
-	list              ui.ListState
+	source      string
+	files       []FilePatch
+	diffs       []*editor.DiffState
+	initialized bool
+	list        ui.ListState
 }
 
 func nativePatch(file FilePatch) editor.FilePatch {
@@ -64,7 +63,15 @@ func diffBody(c *ui.Context, source string, o FileOptions) ui.Element {
 		return patchBody(c, source, o)
 	}
 	root := ui.Column(c).AlignSelf(ui.Stretch)
-	state := *ui.Local(root, "native-patch", func() *nativePatchView { return &nativePatchView{mode: o.DiffMode, fold: o.HideUnchanged} })
+	state := *ui.Local(root, "native-patch", func() *nativePatchView { return &nativePatchView{} })
+	// The light streaming surface and final editor share toolbar state and
+	// viewport estimation, so finalization preserves the user's layout/height.
+	controls := *ui.Local(root, "diff", func() *fileState { return &fileState{expanded: map[string]bool{}} })
+	if !controls.configured {
+		controls.mode = o.DiffMode
+		controls.fold = o.HideUnchanged
+		controls.configured = true
+	}
 	if source != state.source || !state.initialized {
 		state.files = ParseDiff(source)
 		state.diffs = make([]*editor.DiffState, len(state.files))
@@ -77,28 +84,28 @@ func diffBody(c *ui.Context, source string, o FileOptions) ui.Element {
 		state.initialized = true
 	}
 	size, line, maxHeight := fileMetrics(o)
-	rows := diffRows(state.files, Unified, false, 3, nil)
+	rows := diffRows(state.files, controls.mode, controls.fold, o.ContextLines, controls.expanded)
 	height := min(maxHeight, float32(max(len(rows), 1))*line+8)
 	root.Children(func() {
 		ui.Row(c).Gap(6).Children(func() {
 			label := "Split"
-			if state.mode == Split {
+			if controls.mode == Split {
 				label = "Unified"
 			}
 			if ui.Button(c, tr(o.Labels, label)).Clicked() {
-				if state.mode == Split {
-					state.mode = Unified
+				if controls.mode == Split {
+					controls.mode = Unified
 				} else {
-					state.mode = Split
+					controls.mode = Split
 				}
 				c.Invalidate()
 			}
 			label = "Hide unchanged"
-			if state.fold {
+			if controls.fold {
 				label = "Show unchanged"
 			}
 			if ui.Button(c, tr(o.Labels, label)).Clicked() {
-				state.fold = !state.fold
+				controls.fold = !controls.fold
 				c.Invalidate()
 			}
 		})
@@ -121,8 +128,8 @@ func diffBody(c *ui.Context, source string, o FileOptions) ui.Element {
 			d.NoLineNumbers = o.HideLineNumbers
 			d.Wrap = o.Wrap
 			d.ContextLines = o.ContextLines
-			d.ExpandUnchanged = !state.fold
-			if state.mode == Split {
+			d.ExpandUnchanged = !controls.fold
+			if controls.mode == Split {
 				d.Layout = editor.DiffSplit
 			} else {
 				d.Layout = editor.DiffUnified

@@ -31,6 +31,8 @@
 
 ```sh
 go get github.com/zerob13/markstream-go@main
+# 使用可选的 rich 包时：
+go get github.com/zerob13/markstream-go/rich@main
 ```
 
 ```go

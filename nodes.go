@@ -308,6 +308,7 @@ func cloneNodes(nodes []*Node) []*Node {
 	out := make([]*Node, len(nodes))
 	for i, n := range nodes {
 		copy := *n
+		copy.Align = append([]int(nil), n.Align...)
 		if n.Attributes != nil {
 			copy.Attributes = map[string]string{}
 			for k, v := range n.Attributes {

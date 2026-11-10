@@ -32,6 +32,8 @@ Requires **Go 1.27.3+**, matching the pinned MyGo dependency.
 
 ```sh
 go get github.com/zerob13/markstream-go@main
+# When using the optional rich package:
+go get github.com/zerob13/markstream-go/rich@main
 ```
 
 MyGo supports Linux, macOS and Windows without cgo. A desktop window needs the platform libraries and a display; software-rendered native tests and PNG snapshots work without a display server.

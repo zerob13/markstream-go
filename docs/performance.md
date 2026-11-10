@@ -38,7 +38,7 @@ The independent renderer and demo have been exercised with:
 - Native software-rendered light/dark playground, rich gallery, FileDiff and large-document screenshots.
 - Mixed CommonMark/GFM comparison at every byte split, UTF-8 split delivery, strict EOF, stale producer/reset rejection and notification coalescing.
 - 4,000+/5,000-node virtual documents, bounded visible builds, shared references/footnotes, middle save/restore, incompatible-width rejection, prepend identity and anchor preservation.
-- Partial text/HTML/Markdown clipboard formatting, native code copying/folding, custom inline tags/attributes, Chinese labels, visible fade and actual inline-object pixels.
+- Partial text/HTML/Markdown clipboard formatting, native code copying/folding, stable folded-diff height/layout at final handoff, custom inline tags/attributes, Chinese labels, visible fade and actual inline-object pixels.
 - Actual KaTeX display/inline math and macros, D2/Infographic SVG and nonblank PNG output, HTML sanitization, cancellation, immutable result caches and native source/fullscreen/export controls.
 - Mermaid flowchart, sequence, class, state, ER, Gantt, pie, Git, mindmap, timeline, XY, sankey, block and journey fixtures.
 

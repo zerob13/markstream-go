@@ -191,7 +191,7 @@ func (d *demo) view(c *ui.Context) {
 			})
 		})
 		ui.Row(c).Padding(0, 28, 14).Children(func() {
-			ui.Text(c, "Go only. No webview. Select text, copy code, or explore the virtualized history.").FontSize(11).TextColor(theme.TextMuted)
+			ui.Text(c, "Native MyGo UI. Select text, copy code, or explore rich content and virtualized documents.").FontSize(11).TextColor(theme.TextMuted)
 		})
 	})
 }

@@ -141,3 +141,28 @@ func TestFullNativePatchSurfaceAndLooseDiff(t *testing.T) {
 		t.Fatal("native diff is blank")
 	}
 }
+
+func TestFinalDiffHandoffKeepsFoldedViewportHeight(t *testing.T) {
+	source := "--- a/file\n+++ b/file\n@@ -1,40 +1,40 @@\n" + strings.Repeat(" context\n", 20) + "-old\n+new\n" + strings.Repeat(" context\n", 19)
+	streaming := true
+	var height float32
+	tt := ui.NewTester(func(c *ui.Context) {
+		height = FileDiff(c, source, FileOptions{Streaming: streaming, DiffMode: Split, HideUnchanged: true, ContextLines: 2, MaxHeight: 600}).Bounds().H
+	}, 900, 900)
+	tt.Frame()
+	if err := tt.Click("Unified"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	before := height
+	streaming = false
+	for range 4 {
+		tt.Frame()
+	}
+	if height-before > 1 || before-height > 1 {
+		t.Fatalf("final diff changed viewport height: streaming=%g final=%g", before, height)
+	}
+	if !tt.HasText("Split") {
+		t.Fatal("finalization discarded the user's layout choice")
+	}
+}
